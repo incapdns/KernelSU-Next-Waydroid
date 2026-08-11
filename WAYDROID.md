@@ -30,7 +30,40 @@ syscall dispatcher. It does not carry the old direct-syscall tracepoint fork.
 The dispatcher does not provide container isolation, `/data` discovery,
 SELinux decoupling or `ksud late-load`; those adaptations remain necessary.
 
-## Build
+## Supported prebuilt package
+
+The GitHub release is the recommended installation path. It contains all three
+matching artifacts: the Arch package (including `kernelsu.ko`, the patched
+x86_64 `ksud`, loader and timer), the Manager APK and a standalone copy of the
+module. The package is tied to the kernel release shown in its release notes;
+check before installing:
+
+```sh
+uname -r
+```
+
+Download the package and Manager APK from the latest
+[GitHub release](https://github.com/incapdns/KernelSU-Next-Waydroid/releases),
+then install and configure the host package:
+
+```sh
+sudo pacman -U ./kernelsu-next-waydroid-*.pkg.tar.zst
+sudo configure-waydroid-kernelsu
+```
+
+`configure-waydroid-kernelsu` removes only the exact `reboot` entry from
+Waydroid's seccomp deny list and preserves the original profile as
+`waydroid.seccomp.pre-kernelsu`. Zygisk Next needs this syscall; the rest of the
+Waydroid deny list remains unchanged.
+
+Skip directly to **Start or restart Waydroid** after using the prebuilt package.
+
+## Build from source
+
+Building from source requires both the host kernel module and an Android x86_64
+`ksud`. `makepkg` deliberately fails if either artifact is absent.
+
+First build the module for the exact running kernel:
 
 ```sh
 KERNEL_RELEASE=7.1.8-1-cachyos ./kernel/build-waydroid-cachyos.sh
@@ -39,6 +72,24 @@ KERNEL_RELEASE=7.1.8-1-cachyos ./kernel/build-waydroid-cachyos.sh
 The result is `kernel/out-waydroid/kernelsu.ko`. The module must match the
 running kernel's release exactly. This checkout was first validated against
 the installed CachyOS `7.1.8-1-cachyos` headers.
+
+Then build `ksud` for Android x86_64. The upstream reproducible build uses
+`cross` and requires a working Docker or Podman installation:
+
+```sh
+rustup update stable
+cargo install cross --git https://github.com/cross-rs/cross --rev 66845c1
+clang --target=aarch64-linux-gnu -c -nostdlib \
+  -o userspace/ksud/.lkm_image_bootstrap.o \
+  userspace/ksud/src/lkm_image_bootstrap.S
+CROSS_NO_WARNINGS=0 cross build \
+  --target x86_64-linux-android \
+  --release \
+  --manifest-path userspace/ksud/Cargo.toml
+```
+
+The required result is
+`userspace/ksud/target/x86_64-linux-android/release/ksud`.
 
 ## Matching Manager
 
@@ -66,9 +117,15 @@ APK certificate's size and SHA-256.
 cd packaging
 makepkg -f
 sudo pacman -U ./kernelsu-next-waydroid-*.pkg.tar.zst
+sudo configure-waydroid-kernelsu
 ```
 
-After booting the matching kernel:
+Install the matching Manager APK after starting the Waydroid session as shown
+below.
+
+## Start or restart Waydroid
+
+After booting the matching host kernel:
 
 ```sh
 waydroid session stop
@@ -76,6 +133,13 @@ sudo systemctl stop waydroid-container
 sudo load-kernelsu --unload-first
 sudo systemctl start waydroid-container
 waydroid show-full-ui
+```
+
+On a fresh installation, wait until Android reports that user 0 is ready, then
+install the matching Manager (skip this command when it is already installed):
+
+```sh
+waydroid app install ./KernelSU_Next_*-release.apk
 ```
 
 Always stop both the Android session and container before unloading the kernel

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( EUID != 0 )); then
+    echo "${0##*/}: execute as root." >&2
+    exit 1
+fi
+
+profile=/var/lib/waydroid/lxc/waydroid/waydroid.seccomp
+backup=${profile}.pre-kernelsu
+
+if [[ ! -f $profile ]]; then
+    echo "${0##*/}: Waydroid seccomp profile not found: $profile" >&2
+    exit 1
+fi
+
+if [[ ! -e $backup ]]; then
+    install -o root -g root -m 0644 "$profile" "$backup"
+fi
+
+if grep -qx 'reboot' "$profile"; then
+    temporary=$(mktemp "${profile}.XXXXXX")
+    trap 'rm -f -- "${temporary:-}"' EXIT
+    awk '$0 != "reboot"' "$profile" > "$temporary"
+    install -o root -g root -m 0644 "$temporary" "$profile"
+    echo "${0##*/}: removed reboot from the Waydroid seccomp deny list."
+else
+    echo "${0##*/}: Waydroid seccomp profile is already configured."
+fi
+
+echo "${0##*/}: original profile backup: $backup"
+echo "${0##*/}: restart the Waydroid container before testing."
