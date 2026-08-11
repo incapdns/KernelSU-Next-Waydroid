@@ -28,7 +28,15 @@ previous=$(android_shell \
 
 manager_package=com.rifsxd.ksunext
 manager_pid_before=$(android_shell "pidof '$manager_package' || true" 2>/dev/null | tail -n1)
-android_shell '/data/adb/ksud late-load'
+waydroid_init_pid=$(lxc-info -P /var/lib/waydroid/lxc -n waydroid -pH 2>/dev/null || true)
+[[ $waydroid_init_pid =~ ^[0-9]+$ ]] || exit 1
+
+# waydroid shell inherits the container's seccomp filter, which kills the
+# reboot(2)-based KernelSU bootstrap transport. Enter the Android namespaces
+# from an unfiltered host process instead; -r and -w adopt init's root/cwd.
+nsenter --target "$waydroid_init_pid" \
+    --mount --uts --ipc --net --pid --cgroup --root --wd \
+    -- /data/adb/ksud late-load
 
 # ksud daemonizes. Its final successful step force-stops and starts Manager;
 # use the new Manager PID as an observable completion signal.

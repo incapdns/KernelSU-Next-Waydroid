@@ -1,10 +1,10 @@
 pkgname=kernelsu-next-waydroid
 pkgver=3.3.0.dev.r3239
-pkgrel=6
+pkgrel=7
 pkgdesc='KernelSU Next dev host module for Waydroid on CachyOS x86_64'
 arch=('x86_64')
 license=('GPL-2.0-only')
-depends=('modloader' 'waydroid')
+depends=('modloader' 'waydroid' 'util-linux')
 conflicts=('kernelsu-dkms' 'kernelsu-waydroid-current')
 provides=('kernelsu-dkms')
 options=('!strip')
