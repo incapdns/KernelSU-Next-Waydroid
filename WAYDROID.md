@@ -71,12 +71,32 @@ sudo pacman -U ./kernelsu-next-waydroid-*.pkg.tar.zst
 After booting the matching kernel:
 
 ```sh
-sudo load-kernelsu --unload-first
 waydroid session stop
-sudo systemctl restart waydroid-container
+sudo systemctl stop waydroid-container
+sudo load-kernelsu --unload-first
+sudo systemctl start waydroid-container
 waydroid show-full-ui
 ```
 
-The systemd drop-in restarts the late-load helper whenever the Waydroid
-container starts. It waits for Android boot completion and `/data/adb/ksud`,
-then runs `ksud late-load` once for that container init instance.
+Always stop both the Android session and container before unloading the kernel
+module. `load-kernelsu --unload-first` restores the package-matched `ksud` into
+Waydroid's `data/adb` after module teardown. This is required because Android
+init must find `/data/adb/ksud` during its real `post-fs-data` stage, before the
+first Zygote; restoring it later through `late-load` is too late for Zygisk.
+
+The packaged systemd timer retries the late-load helper while Waydroid becomes
+ready. It handles module updates and the remaining late-load stages once per
+container init instance. It does not replace the pre-Zygote `post-fs-data`
+stage described above and does not modify Waydroid's own service unit.
+
+### Verification
+
+After Android reports that user 0 is ready, verify Zygisk Next with:
+
+```sh
+sudo waydroid shell -- sh -c \
+  'ps -A | grep -E "zn-daemon|zn-zygisk-companion"'
+```
+
+At least `zn-daemon` must be present. A Zygisk module such as Integrity Box
+also creates a matching `zn-zygisk-companion` process after injection.

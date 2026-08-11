@@ -33,3 +33,22 @@ case "$module_path" in
     *.gz) gzip -dc "$module_path" | modloader - ;;
     *) cat "$module_path" | modloader - ;;
 esac
+
+# Module teardown removes the Android daemon. Restore the package-matched
+# binary while Waydroid is stopped so Android init can execute post-fs-data
+# before the first Zygote on the next container boot.
+if [[ ${1:-} == --unload-first || ${1:-} == -d ]]; then
+    packaged_ksud=/usr/lib/kernelsu-next-waydroid/ksud-x86_64
+    if [[ -x $packaged_ksud ]]; then
+        restored=0
+        for adb_dir in /home/*/.local/share/waydroid/data/adb /var/lib/waydroid/data/adb; do
+            [[ -d $adb_dir ]] || continue
+            install -o root -g root -m 0755 "$packaged_ksud" "$adb_dir/ksud"
+            echo "${0##*/}: restored package-matched ksud at $adb_dir/ksud"
+            restored=1
+        done
+        if (( ! restored )); then
+            echo "${0##*/}: warning: no Waydroid data/adb directory found; ksud was not restored." >&2
+        fi
+    fi
+fi
