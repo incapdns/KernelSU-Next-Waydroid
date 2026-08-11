@@ -232,12 +232,13 @@ fn link_ksud_to_bin() -> Result<()> {
 
 pub fn install(libadbroot: Option<PathBuf>) -> Result<()> {
     ensure_dir_exists(defs::ADB_DIR)?;
-    let _ = std::fs::remove_file(defs::DAEMON_PATH);
-    std::fs::copy(
-        std::env::current_exe().with_context(|| "Failed to get self exe path")?,
-        defs::DAEMON_PATH,
-    )?;
-    restorecon::lsetfilecon(defs::DAEMON_PATH, restorecon::KSU_CON)?;
+    let current_exe = std::env::current_exe().with_context(|| "Failed to get self exe path")?;
+    let daemon_path = Path::new(defs::DAEMON_PATH);
+    if current_exe != daemon_path {
+        let _ = std::fs::remove_file(daemon_path);
+        std::fs::copy(&current_exe, daemon_path)?;
+        restorecon::lsetfilecon(daemon_path, restorecon::KSU_CON)?;
+    }
     // install binary assets
     assets::ensure_binaries(false).with_context(|| "Failed to extract assets")?;
 

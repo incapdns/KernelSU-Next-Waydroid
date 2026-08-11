@@ -102,6 +102,12 @@ int ksu_observer_init(void)
 {
 	int ret = 0;
 
+#ifdef CONFIG_KSU_NON_ANDROID
+	/* Host-kernel fsnotify internals are not a stable external-module ABI.
+	 * Waydroid manager discovery is handled by the setresuid tracker instead. */
+	return 0;
+#endif
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
 	g = fsnotify_alloc_group(&ksu_ops, 0);
 #else
@@ -117,6 +123,9 @@ int ksu_observer_init(void)
 
 void __exit ksu_observer_exit(void)
 {
+#ifdef CONFIG_KSU_NON_ANDROID
+	return;
+#endif
 	if (!g || IS_ERR(g))
 		return;
 

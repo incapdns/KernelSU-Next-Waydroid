@@ -18,6 +18,7 @@
 #include "hook/syscall_hook.h"
 #include "hook/syscall_event_bridge.h"
 #include "feature/adb_root.h"
+#include "supercall/supercall.h"
 
 static int ksu_handle_init_mark_tracker(const char __user **filename_user)
 {
@@ -39,6 +40,13 @@ static int ksu_handle_init_mark_tracker(const char __user **filename_user)
     if (unlikely(strcmp(path, KSUD_PATH) == 0)) {
         pr_info("hook_manager: escape to root for init executing ksud: %d\n", current->pid);
         escape_to_root_for_init();
+#ifdef CONFIG_KSU_NON_ANDROID
+        /* Waydroid's init inherits the host LXC seccomp filter, which blocks
+         * the reboot(2) bootstrap transport. Install an inheritable driver fd
+         * before exec so ksud never needs that syscall. */
+        if (ksu_install_fd_for_exec() < 0)
+            pr_err("hook_manager: failed to install inheritable ksud fd\n");
+#endif
     } else if (likely(strstr(path, "/app_process") == NULL && strstr(path, "/adbd") == NULL &&
                       strstr(path, "/stub_zygote") == NULL)) {
         pr_info("hook_manager: unmark %d exec %s\n", current->pid, path);
@@ -86,6 +94,13 @@ long __nocfi ksu_hook_execve(int orig_nr, const struct pt_regs *regs)
     if (static_branch_unlikely(&ksud_execve_key))
         ksu_execve_hook_ksud(regs);
 
+#ifdef CONFIG_KSU_NON_ANDROID
+    /* Android init forks an exec-service child before executing ksud, so the
+     * exec task is no longer PID 1. The dispatcher already limits privileged
+     * handling to tasks marked as belonging to the Waydroid PID namespace. */
+    ksu_handle_init_mark_tracker(filename_user);
+#endif
+
     if (current_euid().val == 0)
         pending_root_execve = ksu_sulog_capture_root_execve(*filename_user, argv_user, GFP_KERNEL);
 
@@ -94,7 +109,9 @@ long __nocfi ksu_hook_execve(int orig_nr, const struct pt_regs *regs)
 #else
     if (current->pid != 1 && current_is_init) {
 #endif
+#ifndef CONFIG_KSU_NON_ANDROID
         ksu_handle_init_mark_tracker(filename_user);
+#endif
         ret = ksu_adb_root_handle_execve((struct pt_regs *)regs);
         if (ret) {
             pr_err("adb root failed: %ld\n", ret);

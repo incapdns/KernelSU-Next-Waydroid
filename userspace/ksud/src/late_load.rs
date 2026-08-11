@@ -108,7 +108,8 @@ pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Res
         warn!("init features failed: {e}");
     }
 
-    // 8. Execute late-load stage scripts (blocking)
+    // 8. Execute late-load stage scripts (blocking). post-fs-data belongs to
+    // the normal Android boot path and must run before the first Zygote.
     init_event::run_stage("late-load", true);
 
     // 9. Load system.prop
@@ -121,16 +122,16 @@ pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Res
         warn!("execute metamodule mount failed: {e}");
     }
 
-    // 11. Execute post-mount stage scripts (blocking)
+    // 12. Execute post-mount stage scripts (blocking)
     init_event::run_stage("post-mount", true);
 
-    // 12. Execute service stage scripts (non-blocking)
+    // 13. Execute service stage scripts (non-blocking)
     init_event::run_stage("service", false);
 
-    // 13. Execute boot-completed stage scripts (non-blocking)
+    // 14. Execute boot-completed stage scripts (non-blocking)
     init_event::run_stage("boot-completed", false);
 
-    // 14. Restart Manager so it gets a fresh ksu fd from the newly loaded kernel module
+    // 15. Restart Manager so it gets a fresh ksu fd from the newly loaded kernel module
     info!("Restarting KernelSU Next Manager {package_name}...");
     let _ = Command::new("am").args(["force-stop", package_name]).status();
     let _ = Command::new("am")

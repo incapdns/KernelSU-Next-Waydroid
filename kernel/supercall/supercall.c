@@ -46,18 +46,18 @@ static const struct file_operations anon_ksu_fops = {
     .release = anon_ksu_release,
 };
 
-int ksu_install_fd(void)
+static int ksu_install_fd_with_flags(unsigned int flags)
 {
     struct file *filp;
     int fd;
 
-    fd = get_unused_fd_flags(O_CLOEXEC);
+	fd = get_unused_fd_flags(flags);
     if (fd < 0) {
         pr_err("ksu_install_fd: failed to get unused fd\n");
         return fd;
     }
 
-    filp = anon_inode_getfile("[ksu_driver]", &anon_ksu_fops, NULL, O_RDWR | O_CLOEXEC);
+	filp = anon_inode_getfile("[ksu_driver]", &anon_ksu_fops, NULL, O_RDWR | flags);
     if (IS_ERR(filp)) {
         pr_err("ksu_install_fd: failed to create anon inode file\n");
         put_unused_fd(fd);
@@ -66,7 +66,17 @@ int ksu_install_fd(void)
 
     fd_install(fd, filp);
     pr_info("ksu fd installed: %d for pid %d\n", fd, current->pid);
-    return fd;
+	return fd;
+}
+
+int ksu_install_fd(void)
+{
+	return ksu_install_fd_with_flags(O_CLOEXEC);
+}
+
+int ksu_install_fd_for_exec(void)
+{
+	return ksu_install_fd_with_flags(0);
 }
 
 static void ksu_install_fd_tw_func(struct callback_head *cb)
