@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+log() {
+    logger -t kernelsu-waydroid-aosp-mount-hook -- "$*" 2>/dev/null || true
+}
+trap 'status=$?; log "failed at line $LINENO with status $status"' ERR
+
+# LXC runs this hook in the container mount namespace after lxc.mount.auto has
+# mounted procfs and before pivot_root starts Android init. Android 13's own
+# first_stage_init would mount procfs with these exact data options, but under
+# Waydroid LXC owns that first mount.
+: "${LXC_ROOTFS_MOUNT:?LXC_ROOTFS_MOUNT is not set by LXC}"
+
+proc_mount=$LXC_ROOTFS_MOUNT/proc
+data_mount=$LXC_ROOTFS_MOUNT/data
+waydroid_prop_mount=$LXC_ROOTFS_MOUNT/vendor/waydroid.prop
+host_permissions_mount=$LXC_ROOTFS_MOUNT/vendor/etc/host-permissions
+log "rootfs=$LXC_ROOTFS_MOUNT proc=$proc_mount data=$data_mount"
+[[ -d $proc_mount ]] || {
+    echo "${0##*/}: proc mountpoint does not exist: $proc_mount" >&2
+    exit 1
+}
+
+mount -t proc -o remount,rw,nosuid,nodev,noexec,hidepid=2,gid=3009 proc "$proc_mount"
+
+# fstab.ranchu.x86 for the matching AOSP build requests noatime,nosuid,nodev
+# for /data. Waydroid supplies /data as a host bind mount, so apply the VFS
+# flags to the container bind only; the host Btrfs mount remains unchanged.
+if mountpoint -q "$data_mount"; then
+    log "data before remount: $(findmnt -rn -o TARGET,VFS-OPTIONS,FS-OPTIONS -T "$data_mount" || true)"
+    # A bind remount accepts VFS flags only. Preserve the existing rw/noatime
+    # state and add the two missing AOSP VFS restrictions.
+    mount -o remount,bind,nosuid,nodev "$data_mount"
+    log "data after remount: $(findmnt -rn -o TARGET,VFS-OPTIONS,FS-OPTIONS -T "$data_mount" || true)"
+else
+    echo "${0##*/}: data mountpoint does not exist: $data_mount" >&2
+    exit 1
+fi
+
+# AOSP fstab mounts /vendor read-only. Waydroid adds these host bind mounts
+# below the read-only vendor overlay; remount the container-side binds read-only
+# so they do not punch writable holes through the AOSP vendor policy.
+for vendor_bind in "$waydroid_prop_mount" "$host_permissions_mount"; do
+    if mountpoint -q "$vendor_bind"; then
+        mount -o remount,bind,ro "$vendor_bind"
+    else
+        echo "${0##*/}: expected vendor bind mount does not exist: $vendor_bind" >&2
+        exit 1
+    fi
+done
+
+# Verify the effective superblock options, not merely a successful mount(8)
+# exit. mountinfo field 5 is the mountpoint and fields after " - " include the
+# procfs superblock options where hidepid/gid are reported by the kernel.
+mountinfo=$(awk -v target="$proc_mount" '$5 == target { print; exit }' /proc/self/mountinfo)
+[[ -n $mountinfo ]] || {
+    echo "${0##*/}: proc mount disappeared after remount" >&2
+    exit 1
+}
+
+case ",$mountinfo," in
+    *,hidepid=2,*|*,hidepid=invisible,*) ;;
+    *) echo "${0##*/}: effective proc mount lacks hidepid=2: $mountinfo" >&2; exit 1 ;;
+esac
+
+data_mountinfo=$(awk -v target="$data_mount" '$5 == target { print $6; exit }' /proc/self/mountinfo)
+for required in noatime nosuid nodev; do
+    case ",$data_mountinfo," in
+        *,"$required",*) ;;
+        *) echo "${0##*/}: effective data mount lacks $required: $data_mountinfo" >&2; exit 1 ;;
+    esac
+done
+for vendor_bind in "$waydroid_prop_mount" "$host_permissions_mount"; do
+    vendor_options=$(awk -v target="$vendor_bind" '$5 == target { print $6; exit }' /proc/self/mountinfo)
+    case ",$vendor_options," in
+        *,ro,*) ;;
+        *) echo "${0##*/}: effective vendor bind is not read-only: $vendor_bind $vendor_options" >&2; exit 1 ;;
+    esac
+done
+case ",$mountinfo," in
+    *,gid=3009,*|*,gid=readproc,*) ;;
+    *) echo "${0##*/}: effective proc mount lacks gid=3009: $mountinfo" >&2; exit 1 ;;
+esac

@@ -51,6 +51,21 @@ sudo pacman -U ./kernelsu-next-waydroid-*.pkg.tar.zst
 sudo configure-waydroid-kernelsu
 ```
 
+The configurator also registers a mount-namespace hook before Android `init`.
+For the current Android 13 `TQ3A.230901.001` image it restores the literal AOSP
+procfs policy `hidepid=2,gid=3009` and the AOSP VFS restrictions
+`noatime,nosuid,nodev` on the container's `/data` bind mount. It does not alter
+the host `/proc` or the host Btrfs mount. Verify the effective flags after a
+container restart:
+
+```bash
+sudo kernelsu-waydroid-aosp-mount-audit
+```
+
+The complete source-to-runtime matrix, including every static AOSP r75 mount,
+container substitutions and non-reproducible shared-kernel mounts, is in
+[`docs/WAYDROID_AOSP_MOUNT_AUDIT.md`](docs/WAYDROID_AOSP_MOUNT_AUDIT.md).
+
 `configure-waydroid-kernelsu` removes only the exact `reboot` entry from
 Waydroid's seccomp deny list and preserves the original profile as
 `waydroid.seccomp.pre-kernelsu`. Zygisk Next needs this syscall; the rest of the

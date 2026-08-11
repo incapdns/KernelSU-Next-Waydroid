@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( EUID != 0 )); then
+    echo "${0##*/}: execute as root." >&2
+    exit 1
+fi
+
+waydroid_init_pid=$(lxc-info -P /var/lib/waydroid/lxc -n waydroid -pH 2>/dev/null || true)
+[[ $waydroid_init_pid =~ ^[0-9]+$ ]] || {
+    echo "${0##*/}: Waydroid container is not running." >&2
+    exit 1
+}
+
+read_mountinfo() {
+    nsenter --target "$waydroid_init_pid" --mount --pid --root --wd -- \
+        awk -v target="$1" '$5 == target { print; exit }' /proc/self/mountinfo
+}
+
+check_option() {
+    local mountpoint=$1 option=$2 alternative=${3:-} line haystack
+    line=$(read_mountinfo "$mountpoint")
+    if [[ -z $line ]]; then
+        printf 'FAIL %-24s missing mount\n' "$mountpoint"
+        return 1
+    fi
+    haystack=${line// /,}
+    if [[ ,$haystack, == *,$option,* || ( -n $alternative && ,$haystack, == *,$alternative,* ) ]]; then
+        printf 'PASS %-24s %s\n' "$mountpoint" "$option"
+    else
+        printf 'FAIL %-24s missing %s\n     %s\n' "$mountpoint" "$option" "$line"
+        return 1
+    fi
+}
+
+failed=0
+check_option /proc hidepid=2 hidepid=invisible || failed=1
+check_option /proc gid=3009 gid=readproc || failed=1
+check_option /data noatime || failed=1
+check_option /data nosuid || failed=1
+check_option /data nodev || failed=1
+check_option /vendor/waydroid.prop ro || failed=1
+check_option /vendor/etc/host-permissions ro || failed=1
+check_option /mnt nosuid || failed=1
+check_option /mnt nodev || failed=1
+check_option /mnt noexec || failed=1
+check_option /apex nosuid || failed=1
+check_option /apex nodev || failed=1
+check_option /apex noexec || failed=1
+check_option /linkerconfig nosuid || failed=1
+check_option /linkerconfig nodev || failed=1
+check_option /linkerconfig noexec || failed=1
+check_option /config nosuid || failed=1
+check_option /config nodev || failed=1
+check_option /config noexec || failed=1
+check_option /sys/fs/bpf nosuid || failed=1
+check_option /sys/fs/bpf nodev || failed=1
+check_option /sys/fs/bpf noexec || failed=1
+check_option /sys/fs/pstore nosuid || failed=1
+check_option /sys/fs/pstore nodev || failed=1
+check_option /sys/fs/pstore noexec || failed=1
+
+exit "$failed"

@@ -8,6 +8,9 @@ fi
 
 profile=/var/lib/waydroid/lxc/waydroid/waydroid.seccomp
 backup=${profile}.pre-kernelsu
+container_config=/var/lib/waydroid/lxc/waydroid/config
+container_config_backup=${container_config}.pre-kernelsu
+aosp_mount_hook=/usr/lib/kernelsu-next-waydroid/aosp-mount-hook
 
 if [[ ! -f $profile ]]; then
     echo "${0##*/}: Waydroid seccomp profile not found: $profile" >&2
@@ -28,5 +31,27 @@ else
     echo "${0##*/}: Waydroid seccomp profile is already configured."
 fi
 
+if [[ ! -f $container_config ]]; then
+    echo "${0##*/}: Waydroid LXC config not found: $container_config" >&2
+    exit 1
+fi
+if [[ ! -x $aosp_mount_hook ]]; then
+    echo "${0##*/}: AOSP mount hook not installed: $aosp_mount_hook" >&2
+    exit 1
+fi
+if [[ ! -e $container_config_backup ]]; then
+    install -o root -g root -m 0644 "$container_config" "$container_config_backup"
+fi
+
+hook_line="lxc.hook.mount = $aosp_mount_hook"
+if grep -Fqx "$hook_line" "$container_config"; then
+    echo "${0##*/}: AOSP mount hook is already configured."
+else
+    printf '\n# Restore Android 13 first_stage_init procfs security inside the container namespace.\n%s\n' \
+        "$hook_line" >> "$container_config"
+    echo "${0##*/}: configured Android 13 AOSP procfs mount options."
+fi
+
 echo "${0##*/}: original profile backup: $backup"
+echo "${0##*/}: original container config backup: $container_config_backup"
 echo "${0##*/}: restart the Waydroid container before testing."
