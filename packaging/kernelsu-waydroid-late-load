@@ -26,5 +26,20 @@ previous=$(android_shell \
     2>/dev/null | tail -n1)
 [[ $previous != "$init_start" ]] || exit 0
 
+manager_package=com.rifsxd.ksunext
+manager_pid_before=$(android_shell "pidof '$manager_package' || true" 2>/dev/null | tail -n1)
 android_shell '/data/adb/ksud late-load'
-android_shell "printf '%s\\n' '$init_start' > /data/adb/ksu/.waydroid_late_load"
+
+# ksud daemonizes. Its final successful step force-stops and starts Manager;
+# use the new Manager PID as an observable completion signal.
+for _ in $(seq 1 90); do
+    manager_pid_after=$(android_shell "pidof '$manager_package' || true" 2>/dev/null | tail -n1)
+    if [[ -n $manager_pid_after && $manager_pid_after != "$manager_pid_before" ]]; then
+        android_shell "printf '%s\\n' '$init_start' > /data/adb/ksu/.waydroid_late_load"
+        exit 0
+    fi
+    sleep 2
+done
+
+echo "${0##*/}: ksud late-load did not restart $manager_package" >&2
+exit 1
