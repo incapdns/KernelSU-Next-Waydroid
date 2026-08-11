@@ -10,16 +10,16 @@ if (( EUID != 0 )); then
     exit 1
 fi
 
-grep -q '^kernelsu ' /proc/modules || exit 1
-waydroid status 2>/dev/null | grep -q $'Container:\tRUNNING' || exit 1
+grep -q '^kernelsu ' /proc/modules || exit 0
+waydroid status 2>/dev/null | grep -q $'Container:\tRUNNING' || exit 0
 
 ready=$(android_shell \
     'test "$(getprop sys.boot_completed)" = 1 && test -x /data/adb/ksud && echo yes' \
     2>/dev/null || true)
-[[ $ready == *yes* ]] || exit 1
+[[ $ready == *yes* ]] || exit 0
 
 init_start=$(android_shell "awk '{print \$22}' /proc/1/stat" 2>/dev/null | tail -n1)
-[[ $init_start =~ ^[0-9]+$ ]] || exit 1
+[[ $init_start =~ ^[0-9]+$ ]] || exit 0
 
 previous=$(android_shell \
     'test -f /data/adb/ksu/.waydroid_late_load && cat /data/adb/ksu/.waydroid_late_load || true' \

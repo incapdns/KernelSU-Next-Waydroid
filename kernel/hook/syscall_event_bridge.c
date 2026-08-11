@@ -2,6 +2,8 @@
 #include "linux/cred.h"
 #include "linux/jump_label.h"
 #include "linux/printk.h"
+#include "linux/seccomp.h"
+#include "linux/sched/signal.h"
 #include "selinux/selinux.h"
 #include <asm/syscall.h>
 #include <linux/ptrace.h>
@@ -18,6 +20,7 @@
 #include "hook/syscall_hook.h"
 #include "hook/syscall_event_bridge.h"
 #include "feature/adb_root.h"
+#include "infra/seccomp_cache.h"
 
 static int ksu_handle_init_mark_tracker(const char __user **filename_user)
 {
@@ -37,6 +40,20 @@ static int ksu_handle_init_mark_tracker(const char __user **filename_user)
 
     path[sizeof(path) - 1] = '\0';
     if (unlikely(strcmp(path, KSUD_PATH) == 0)) {
+#ifdef CONFIG_KSU_NON_ANDROID
+        /*
+         * Waydroid's seccomp policy kills reboot(2) with SIGSYS. KernelSU
+         * uses that syscall as the bootstrap transport which installs its
+         * anonymous driver fd, so permit it in the executing init task's
+         * seccomp action cache before ksud replaces the process image.
+         */
+        if (current->seccomp.mode == SECCOMP_MODE_FILTER &&
+            current->seccomp.filter) {
+            spin_lock_irq(&current->sighand->siglock);
+            ksu_seccomp_allow_cache(current->seccomp.filter, __NR_reboot);
+            spin_unlock_irq(&current->sighand->siglock);
+        }
+#endif
         pr_info("hook_manager: escape to root for init executing ksud: %d\n", current->pid);
         escape_to_root_for_init();
     } else if (likely(strstr(path, "/app_process") == NULL && strstr(path, "/adbd") == NULL &&

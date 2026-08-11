@@ -1,6 +1,6 @@
 pkgname=kernelsu-next-waydroid
 pkgver=3.3.0.dev.r3239
-pkgrel=2
+pkgrel=3
 pkgdesc='KernelSU Next dev host module for Waydroid on CachyOS x86_64'
 arch=('x86_64')
 license=('GPL-2.0-only')
@@ -27,6 +27,9 @@ package() {
         "$pkgdir/usr/bin/kernelsu-waydroid-late-load"
     install -Dm0644 "$repo_root/packaging/kernelsu-waydroid-late-load.service" \
         "$pkgdir/usr/lib/systemd/system/kernelsu-waydroid-late-load.service"
-    install -Dm0644 "$repo_root/packaging/waydroid-container-kernelsu.conf" \
-        "$pkgdir/usr/lib/systemd/system/waydroid-container.service.d/kernelsu.conf"
+    install -Dm0644 "$repo_root/packaging/kernelsu-waydroid-late-load.timer" \
+        "$pkgdir/usr/lib/systemd/system/kernelsu-waydroid-late-load.timer"
+    install -d "$pkgdir/usr/lib/systemd/system/timers.target.wants"
+    ln -s ../kernelsu-waydroid-late-load.timer \
+        "$pkgdir/usr/lib/systemd/system/timers.target.wants/kernelsu-waydroid-late-load.timer"
 }
