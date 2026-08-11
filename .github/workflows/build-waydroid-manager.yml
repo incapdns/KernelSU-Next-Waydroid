@@ -55,8 +55,8 @@ jobs:
       - name: Install matching ksud binaries
         run: |
           mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/jniLibs/x86_64
-          cp aarch64/aarch64-linux-android/release/ksud app/src/main/jniLibs/arm64-v8a/libksud.so
-          cp x86_64/x86_64-linux-android/release/ksud app/src/main/jniLibs/x86_64/libksud.so
+          cp ../aarch64/aarch64-linux-android/release/ksud app/src/main/jniLibs/arm64-v8a/libksud.so
+          cp ../x86_64/x86_64-linux-android/release/ksud app/src/main/jniLibs/x86_64/libksud.so
 
       - name: Build Manager
         run: ./gradlew clean assembleRelease
