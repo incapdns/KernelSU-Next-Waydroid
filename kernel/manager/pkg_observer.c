@@ -82,13 +82,9 @@ static int watch_one_dir(struct watch_dir *wd)
 	return 0;
 }
 
-static void unwatch_one_dir(struct watch_dir *wd)
+static void release_watch_path(struct watch_dir *wd)
 {
-	if (wd->mark) {
-		fsnotify_destroy_mark(wd->mark, g);
-		fsnotify_put_mark(wd->mark);
-		wd->mark = NULL;
-	}
+	wd->mark = NULL;
 	if (wd->inode) {
 		iput(wd->inode);
 		wd->inode = NULL;
@@ -124,14 +120,15 @@ void __exit ksu_observer_exit(void)
 	if (!g || IS_ERR(g))
 		return;
 
-	unwatch_one_dir(&g_watch);
 	/*
-	 * fsnotify_destroy_mark() queues final mark destruction on a global
-	 * workqueue.  The callback still references ksu_ops, so an LKM must wait
-	 * for that work before its text and static data can be unloaded.
+	 * Use the canonical group teardown. It stops new events, clears every
+	 * group mark, drains the asynchronous mark reaper, flushes queued events,
+	 * and only then drops the group's final reference. Doing these operations
+	 * piecemeal either leaves ksu_ops reachable after module unload or races
+	 * the global mark reaper.
 	 */
-	fsnotify_wait_marks_destroyed();
-	fsnotify_put_group(g);
+	fsnotify_destroy_group(g);
 	g = NULL;
+	release_watch_path(&g_watch);
 	pr_info("observer exit done\n");
 }
