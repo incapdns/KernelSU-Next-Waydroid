@@ -22,7 +22,7 @@
 #include "feature/adb_root.h"
 #include "infra/seccomp_cache.h"
 
-static int ksu_handle_init_mark_tracker(const char __user **filename_user)
+static bool ksu_prepare_ksud_exec(const char __user **filename_user)
 {
     char path[64];
     unsigned long addr;
@@ -30,34 +30,54 @@ static int ksu_handle_init_mark_tracker(const char __user **filename_user)
     long ret;
 
     if (unlikely(!filename_user))
-        return 0;
+        return false;
 
     addr = untagged_addr((unsigned long)*filename_user);
     fn = (const char __user *)addr;
     ret = strncpy_from_user(path, fn, sizeof(path));
     if (ret < 0)
-        return 0;
+        return false;
 
     path[sizeof(path) - 1] = '\0';
-    if (unlikely(strcmp(path, KSUD_PATH) == 0)) {
+    if (strcmp(path, KSUD_PATH) != 0)
+        return false;
+
 #ifdef CONFIG_KSU_NON_ANDROID
-        /*
-         * Waydroid's seccomp policy kills reboot(2) with SIGSYS. KernelSU
-         * uses that syscall as the bootstrap transport which installs its
-         * anonymous driver fd, so permit it in the executing init task's
-         * seccomp action cache before ksud replaces the process image.
-         */
-        if (current->seccomp.mode == SECCOMP_MODE_FILTER &&
-            current->seccomp.filter) {
-            spin_lock_irq(&current->sighand->siglock);
-            ksu_seccomp_allow_cache(current->seccomp.filter, __NR_reboot);
-            spin_unlock_irq(&current->sighand->siglock);
-        }
+    /*
+     * Waydroid's seccomp policy kills reboot(2) with SIGSYS. KernelSU uses
+     * that syscall as the bootstrap transport which installs its anonymous
+     * driver fd.  The late-load helper is launched by `waydroid shell`, not
+     * PID 1, so prepare whichever Android root task is executing KSUD_PATH.
+     */
+    if (current->seccomp.mode == SECCOMP_MODE_FILTER &&
+        current->seccomp.filter) {
+        spin_lock_irq(&current->sighand->siglock);
+        ksu_seccomp_allow_cache(current->seccomp.filter, __NR_reboot);
+        spin_unlock_irq(&current->sighand->siglock);
+    }
 #endif
-        pr_info("hook_manager: escape to root for init executing ksud: %d\n", current->pid);
-        escape_to_root_for_init();
-    } else if (likely(strstr(path, "/app_process") == NULL && strstr(path, "/adbd") == NULL &&
-                      strstr(path, "/stub_zygote") == NULL)) {
+    pr_info("hook_manager: prepare task %d executing ksud\n", current->pid);
+    escape_to_root_for_init();
+    return true;
+}
+
+static int ksu_handle_init_mark_tracker(const char __user **filename_user)
+{
+    char path[64];
+    long ret;
+
+    if (ksu_prepare_ksud_exec(filename_user))
+        return 0;
+    if (unlikely(!filename_user))
+        return 0;
+
+    ret = strncpy_from_user(path, *filename_user, sizeof(path));
+    if (ret < 0)
+        return 0;
+    path[sizeof(path) - 1] = '\0';
+
+    if (likely(strstr(path, "/app_process") == NULL && strstr(path, "/adbd") == NULL &&
+               strstr(path, "/stub_zygote") == NULL)) {
         pr_info("hook_manager: unmark %d exec %s\n", current->pid, path);
         ksu_clear_task_tracepoint_flag_if_needed(current);
     }
@@ -107,6 +127,9 @@ long __nocfi ksu_hook_execve(int orig_nr, const struct pt_regs *regs)
         pending_root_execve = ksu_sulog_capture_root_execve(*filename_user, argv_user, GFP_KERNEL);
 
 #ifdef CONFIG_KSU_NON_ANDROID
+    if (!current_is_init && current_euid().val == 0)
+        ksu_prepare_ksud_exec(filename_user);
+
     if (current_is_init) {
 #else
     if (current->pid != 1 && current_is_init) {
