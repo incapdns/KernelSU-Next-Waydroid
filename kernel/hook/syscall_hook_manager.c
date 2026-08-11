@@ -6,6 +6,10 @@
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <trace/events/syscalls.h>
+#ifdef CONFIG_KSU_NON_ANDROID
+#include <trace/events/sched.h>
+#include <linux/pid_namespace.h>
+#endif
 
 #include <linux/version.h>
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 7, 0)
@@ -59,6 +63,10 @@ static int syscall_regfunc_handler(struct kretprobe_instance *ri, struct pt_regs
 {
     unsigned long flags;
     ksu_tp_marker_lock(&flags);
+#ifdef CONFIG_KSU_NON_ANDROID
+    /* Never use mark-all on a host kernel. */
+    ksu_mark_running_process_locked();
+#else
     if (ksu_tp_marker_reg_count() < 1) {
         // while install our tracepoint, mark our processes
         ksu_mark_running_process_locked();
@@ -66,6 +74,7 @@ static int syscall_regfunc_handler(struct kretprobe_instance *ri, struct pt_regs
         // while other tracepoint first added, mark all processes
         ksu_mark_all_process();
     }
+#endif
     ksu_tp_marker_inc_reg_count();
     ksu_tp_marker_unlock(&flags);
     return 0;
@@ -76,6 +85,12 @@ static int syscall_unregfunc_handler(struct kretprobe_instance *ri, struct pt_re
     unsigned long flags;
     ksu_tp_marker_lock(&flags);
     ksu_tp_marker_dec_reg_count();
+#ifdef CONFIG_KSU_NON_ANDROID
+    if (ksu_tp_marker_reg_count() <= 0)
+        ksu_unmark_all_process();
+    else
+        ksu_mark_running_process_locked();
+#else
     if (ksu_tp_marker_reg_count() <= 0) {
         // while no tracepoint left, unmark all processes
         ksu_unmark_all_process();
@@ -83,6 +98,7 @@ static int syscall_unregfunc_handler(struct kretprobe_instance *ri, struct pt_re
         // while just our tracepoint left, unmark disallowed processes
         ksu_mark_running_process_locked();
     }
+#endif
     ksu_tp_marker_unlock(&flags);
     return 0;
 }
@@ -92,9 +108,51 @@ static struct kretprobe *syscall_unregfunc_rp = NULL;
 #endif
 
 #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
+#ifdef CONFIG_KSU_NON_ANDROID
+static bool waydroid_trace_enabled = true;
+static pid_t waydroid_init_host_pid;
+static bool sys_enter_registered;
+static bool sched_exec_registered;
+static bool sched_exit_registered;
+
+static void ksu_waydroid_exec(void *data, struct task_struct *task,
+                              pid_t old_pid, struct linux_binprm *bprm)
+{
+    if (task_pid_vnr(task) != 1 ||
+        strcmp(bprm->filename, "/system/bin/init"))
+        return;
+
+    waydroid_init_host_pid = task_pid_nr(task);
+    waydroid_trace_enabled = true;
+    ksu_set_task_tracepoint_flag(task);
+    pr_info("hook_manager: Waydroid init started as host pid %d\n",
+            waydroid_init_host_pid);
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
+static void ksu_waydroid_exit(void *data, struct task_struct *task,
+                              bool group_dead)
+#else
+static void ksu_waydroid_exit(void *data, struct task_struct *task)
+#endif
+{
+    if (task_pid_nr(task) != waydroid_init_host_pid)
+        return;
+
+    waydroid_trace_enabled = false;
+    waydroid_init_host_pid = 0;
+    pr_info("hook_manager: Waydroid init stopped\n");
+}
+#endif
+
 // sys_enter handler: redirect hooked syscalls to the dispatcher
 static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
 {
+#ifdef CONFIG_KSU_NON_ANDROID
+    if (unlikely(!waydroid_trace_enabled ||
+                 task_active_pid_ns(current) == &init_pid_ns))
+        return;
+#endif
 #if defined(__x86_64__)
     if (unlikely(in_compat_syscall()))
 #elif defined(__aarch64__)
@@ -145,8 +203,24 @@ void __init ksu_syscall_hook_manager_init(void)
     if (ret) {
         pr_err("hook_manager: failed to register sys_enter tracepoint: %d\n", ret);
     } else {
+#ifdef CONFIG_KSU_NON_ANDROID
+        sys_enter_registered = true;
+#endif
         pr_info("hook_manager: sys_enter tracepoint registered\n");
     }
+#ifdef CONFIG_KSU_NON_ANDROID
+    ret = register_trace_sched_process_exec(ksu_waydroid_exec, NULL);
+    if (!ret)
+        sched_exec_registered = true;
+    else
+        pr_err("hook_manager: failed Waydroid exec tracepoint: %d\n", ret);
+
+    ret = register_trace_sched_process_exit(ksu_waydroid_exit, NULL);
+    if (!ret)
+        sched_exit_registered = true;
+    else
+        pr_err("hook_manager: failed Waydroid exit tracepoint: %d\n", ret);
+#endif
 #endif
 
     ksu_setuid_hook_init();
@@ -158,7 +232,23 @@ void __exit ksu_syscall_hook_manager_exit(void)
 {
     pr_info("hook_manager: ksu_hook_manager_exit called\n");
 #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
+#ifdef CONFIG_KSU_NON_ANDROID
+    waydroid_trace_enabled = false;
+    if (sys_enter_registered) {
+        unregister_trace_sys_enter(ksu_sys_enter_handler, NULL);
+        sys_enter_registered = false;
+    }
+    if (sched_exec_registered) {
+        unregister_trace_sched_process_exec(ksu_waydroid_exec, NULL);
+        sched_exec_registered = false;
+    }
+    if (sched_exit_registered) {
+        unregister_trace_sched_process_exit(ksu_waydroid_exit, NULL);
+        sched_exit_registered = false;
+    }
+#else
     unregister_trace_sys_enter(ksu_sys_enter_handler, NULL);
+#endif
     tracepoint_synchronize_unregister();
     pr_info("hook_manager: sys_enter tracepoint unregistered\n");
 #endif

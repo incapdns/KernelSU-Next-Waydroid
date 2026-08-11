@@ -79,7 +79,8 @@ try_setns:
     rcu_read_lock();
     // &init_task is not init, but swapper/idle, which forks the init process
     // so we need find init process
-    struct pid *pid_struct = find_pid_ns(1, &init_pid_ns);
+    struct pid_namespace *target_pid_ns = task_active_pid_ns(current);
+    struct pid *pid_struct = find_pid_ns(1, target_pid_ns);
     if (unlikely(!pid_struct)) {
         rcu_read_unlock();
         pr_warn("failed to find pid_struct for PID 1\n");

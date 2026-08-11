@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (( EUID != 0 )); then
+    echo "${0##*/}: execute como root." >&2
+    exit 1
+fi
+
+kernel_release=$(uname -r)
+module_path=$(modinfo -n kernelsu 2>/dev/null || true)
+if [[ -z $module_path ]]; then
+    module_path=$(find "/usr/lib/modules/${kernel_release}"/{extras,updates} \
+        -iname 'kernelsu.ko*' -print -quit 2>/dev/null || true)
+fi
+if [[ -z $module_path ]]; then
+    echo "${0##*/}: kernelsu.ko não existe para ${kernel_release}." >&2
+    exit 1
+fi
+
+if ! grep -wq ext4 /proc/modules; then
+    modprobe ext4
+fi
+
+if [[ ${1:-} == --unload-first || ${1:-} == -d ]]; then
+    if grep -q '^kernelsu ' /proc/modules; then
+        rmmod kernelsu
+    fi
+fi
+
+case "$module_path" in
+    *.zst) zstdcat "$module_path" | modloader - ;;
+    *.xz) xzcat "$module_path" | modloader - ;;
+    *.gz) gzip -dc "$module_path" | modloader - ;;
+    *) cat "$module_path" | modloader - ;;
+esac
+
+systemctl restart --no-block kernelsu-waydroid-late-load.service 2>/dev/null || true

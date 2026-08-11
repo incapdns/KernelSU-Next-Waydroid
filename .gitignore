@@ -4,3 +4,7 @@ CLAUDE.md
 AGENTS.md
 .DS_Store
 /userspace/ksud/.lkm_image_bootstrap.o
+/kernel/out-waydroid/
+/packaging/pkg/
+/packaging/src/
+/packaging/*.pkg.tar.*

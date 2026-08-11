@@ -11,6 +11,23 @@ config KSU
 	  To compile as a module, choose M here: the
 	  module will be called kernelsu.
 
+config KSU_NON_ANDROID
+	bool "KernelSU for a non-Android host (Waydroid)"
+	depends on KSU && X86_64 && KALLSYMS && HAVE_SYSCALL_TRACEPOINTS
+	default n
+	help
+	  Build KernelSU as a host module serving an Android container. Host
+	  processes are excluded and Android tasks are selected by PID namespace.
+
+config KSU_SELINUX
+	bool "Android SELinux integration"
+	depends on KSU && SECURITY_SELINUX
+	default y if !KSU_NON_ANDROID
+	default n
+	help
+	  Compile the in-kernel Android SELinux integration. Distribution host
+	  kernels used by Waydroid should disable it.
+
 config KSU_DEBUG
 	bool "KernelSU debug mode"
 	depends on KSU

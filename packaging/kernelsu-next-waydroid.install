@@ -1,0 +1,21 @@
+post_install() {
+    local module_dir
+    for module_dir in /usr/lib/modules/*/updates/kernelsu.ko; do
+        [[ -e $module_dir ]] || continue
+        depmod -a "$(basename "$(dirname "$(dirname "$module_dir")")")"
+    done
+    systemctl daemon-reload
+}
+
+post_upgrade() {
+    post_install
+}
+
+pre_remove() {
+    systemctl stop kernelsu-waydroid-late-load.service 2>/dev/null || true
+}
+
+post_remove() {
+    depmod -a
+    systemctl daemon-reload
+}

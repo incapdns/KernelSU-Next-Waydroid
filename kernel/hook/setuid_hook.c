@@ -16,16 +16,50 @@
 #include "hook/setuid_hook.h"
 #include "klog.h" // IWYU pragma: keep
 #include "manager/manager_identity.h"
+#include "manager/throne_tracker.h"
 #include "infra/seccomp_cache.h"
 #include "supercall/supercall.h"
 #include "hook/tp_marker.h"
 #include "feature/kernel_umount.h"
+#include "ksu.h"
+
+#ifdef CONFIG_KSU_NON_ANDROID
+static atomic_t waydroid_data_initialized = ATOMIC_INIT(0);
+
+static void ksu_waydroid_init_data(void)
+{
+    const struct cred *saved;
+
+    if (atomic_cmpxchg(&waydroid_data_initialized, 0, 1) != 0)
+        return;
+
+    /* We are now in an Android syscall context, so /data is Waydroid's. */
+    saved = override_creds(ksu_cred);
+    track_throne(false);
+    ksu_load_allow_list();
+    revert_creds(saved);
+
+    if (!ksu_is_manager_appid_valid()) {
+        atomic_set(&waydroid_data_initialized, 0);
+        pr_warn("Waydroid Manager discovery will be retried\n");
+        return;
+    }
+
+    ksu_mark_running_process();
+    pr_info("Waydroid Manager and allowlist discovery completed\n");
+}
+#endif
 
 int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid)
 {
     // we rely on the fact that zygote always call setresuid(3) with same uids
 
     pr_info("handle_setresuid from %d to %d\n", old_uid, new_uid);
+
+#ifdef CONFIG_KSU_NON_ANDROID
+    if (old_uid == 0 && new_uid >= 10000)
+        ksu_waydroid_init_data();
+#endif
 
     if (unlikely(is_uid_manager(new_uid))) {
         spin_lock_irq(&current->sighand->siglock);

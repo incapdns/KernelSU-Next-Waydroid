@@ -5,6 +5,7 @@
 #include <linux/version.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/task.h>
+#include <linux/pid_namespace.h>
 
 #include "policy/allowlist.h"
 #include "klog.h" // IWYU pragma: keep
@@ -82,6 +83,30 @@ void ksu_mark_running_process_locked(void)
     struct task_struct *p, *t;
     read_lock(&tasklist_lock);
     for_each_process_thread (p, t) {
+#ifdef CONFIG_KSU_NON_ANDROID
+        int uid;
+        bool should_mark;
+
+        if (!t->mm)
+            continue;
+
+        /* KernelSU belongs to Android tasks only, never to host tasks. */
+        if (task_active_pid_ns(t) == &init_pid_ns) {
+            ksu_clear_task_tracepoint_flag(t);
+            continue;
+        }
+
+        uid = task_uid(t).val;
+        /* Container root includes init/zygote; children inherit the mark. */
+        should_mark = uid == 0 || uid == 2000 || ksu_is_allow_uid(uid);
+        if (should_mark) {
+            ksu_set_task_tracepoint_flag(t);
+            pr_info("tp_marker: mark Android task: pid:%d uid:%d comm:%s\n",
+                    t->pid, uid, t->comm);
+        } else {
+            ksu_clear_task_tracepoint_flag(t);
+        }
+#else
         if (t->pid != 1 && !t->mm) {
             // skip kernel threads, but always allow pid 1
             continue;
@@ -104,6 +129,7 @@ void ksu_mark_running_process_locked(void)
                     t->pid, uid, t->comm);
         }
         put_cred(cred);
+#endif
     }
     read_unlock(&tasklist_lock);
 }

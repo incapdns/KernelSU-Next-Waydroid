@@ -75,7 +75,11 @@ long __nocfi ksu_hook_execve(int orig_nr, const struct pt_regs *regs)
 {
     const char __user **filename_user = (const char __user **)&PT_REGS_PARM1(regs);
     const char __user *const __user *argv_user = (const char __user *const __user *)PT_REGS_PARM2(regs);
+#ifdef CONFIG_KSU_NON_ANDROID
+    bool current_is_init = task_pid_vnr(current) == 1;
+#else
     bool current_is_init = is_init(current_cred());
+#endif
     struct ksu_sulog_pending_event *pending_root_execve = NULL;
     long ret;
 
@@ -85,7 +89,11 @@ long __nocfi ksu_hook_execve(int orig_nr, const struct pt_regs *regs)
     if (current_euid().val == 0)
         pending_root_execve = ksu_sulog_capture_root_execve(*filename_user, argv_user, GFP_KERNEL);
 
+#ifdef CONFIG_KSU_NON_ANDROID
+    if (current_is_init) {
+#else
     if (current->pid != 1 && current_is_init) {
+#endif
         ksu_handle_init_mark_tracker(filename_user);
         ret = ksu_adb_root_handle_execve((struct pt_regs *)regs);
         if (ret) {
