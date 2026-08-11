@@ -42,9 +42,12 @@ the installed CachyOS `7.1.8-1-cachyos` headers.
 
 ## Matching Manager
 
-Install the official, non-spoofed KernelSU Next v3.3.0 Manager before testing
-this kernel. Its APK v2 certificate is exactly the identity compiled into the
-module:
+Install the official, non-spoofed KernelSU Next `dev` Manager built by the
+upstream CI for commit `234f6e040fcbca18b16d2398e1aa225712ec99ad` before
+testing this kernel. The matching artifact is
+`KernelSU_Next_v3.3.0-25-g234f6e04_33239-release.apk`; it contains the x86_64
+`ksud` from that same commit and uses UAPI version 2, exactly like the kernel.
+Its APK v2 certificate is the identity compiled into the module:
 
 ```text
 certificate size:   998 (0x3e6)
@@ -53,7 +56,9 @@ certificate SHA256: 79e590113c4c4c0c222978e413a5faa801666957b1212a328e46c00c6982
 
 The verified APK is included in this repository's GitHub release. A Manager
 built in an unrelated fork without the official signing secret has a different
-certificate and will intentionally not be crowned by the kernel.
+certificate and will intentionally not be crowned by the kernel. A custom
+Manager remains possible, but requires compiling the kernel with that custom
+APK certificate's size and SHA-256.
 
 ## Package and install
 
