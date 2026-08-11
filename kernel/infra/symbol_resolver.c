@@ -40,7 +40,6 @@ static int (*kallsyms_on_each_symbol_fn)(int (*fn)(void *, const char *, struct 
 
 // https://github.com/torvalds/linux/commit/4dc533e0f2c04174e1ae4aa98e7cffc1c04b9998
 #if HAVE_ON_EACH_MATCH_SYMBOL
-static int (*kallsyms_on_each_match_symbol_fn)(int (*fn)(void *, unsigned long), const char *name, void *data) = NULL;
 static int find_kernel_symbol_exact_cb(void *data, unsigned long addr)
 {
     *(unsigned long *)data = addr;
@@ -58,10 +57,15 @@ unsigned long __nocfi find_kernel_symbol_exact(const char *symbol_name)
 {
     unsigned long addr = 0;
 #if HAVE_ON_EACH_MATCH_SYMBOL
-    if (likely(kallsyms_on_each_match_symbol_fn)) {
-        kallsyms_on_each_match_symbol_fn(find_kernel_symbol_exact_cb, symbol_name, &addr);
-        return addr;
-    }
+    /*
+     * This must remain a direct call. Some x86 distribution kernels expose
+     * kallsyms_on_each_match_symbol without an ENDBR instruction; calling an
+     * address obtained from kallsyms through a function pointer triggers an
+     * IBT control-protection fault. modloader resolves the direct relocation
+     * while preserving the kernel's intended direct-call semantics.
+     */
+    kallsyms_on_each_match_symbol(find_kernel_symbol_exact_cb, symbol_name, &addr);
+    return addr;
 #endif
     char *module_name = NULL;
     char buf[KSYM_SYMBOL_LEN];
@@ -178,12 +182,6 @@ void __init ksu_init_symbol_resolver()
     kallsyms_on_each_symbol_fn = find_kernel_symbol_exact("kallsyms_on_each_symbol");
     if (!kallsyms_on_each_symbol_fn) {
         pr_warn("kallsyms_on_each_symbol not found!\n");
-    }
-#endif
-#if HAVE_ON_EACH_MATCH_SYMBOL
-    kallsyms_on_each_match_symbol_fn = find_kernel_symbol_exact("kallsyms_on_each_match_symbol");
-    if (!kallsyms_on_each_match_symbol_fn) {
-        pr_warn("kallsyms_on_each_match_symbol not found!\n");
     }
 #endif
 }

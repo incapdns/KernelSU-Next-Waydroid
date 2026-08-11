@@ -6,5 +6,3 @@ StartLimitIntervalSec=0
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/kernelsu-waydroid-late-load
-Restart=on-failure
-RestartSec=5
