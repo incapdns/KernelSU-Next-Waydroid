@@ -40,6 +40,21 @@ The result is `kernel/out-waydroid/kernelsu.ko`. The module must match the
 running kernel's release exactly. This checkout was first validated against
 the installed CachyOS `7.1.8-1-cachyos` headers.
 
+## Matching Manager
+
+Install the official, non-spoofed KernelSU Next v3.3.0 Manager before testing
+this kernel. Its APK v2 certificate is exactly the identity compiled into the
+module:
+
+```text
+certificate size:   998 (0x3e6)
+certificate SHA256: 79e590113c4c4c0c222978e413a5faa801666957b1212a328e46c00c69821bf7
+```
+
+The verified APK is included in this repository's GitHub release. A Manager
+built in an unrelated fork without the official signing secret has a different
+certificate and will intentionally not be crowned by the kernel.
+
 ## Package and install
 
 ```sh
