@@ -33,5 +33,3 @@ case "$module_path" in
     *.gz) gzip -dc "$module_path" | modloader - ;;
     *) cat "$module_path" | modloader - ;;
 esac
-
-systemctl restart --no-block kernelsu-waydroid-late-load.service 2>/dev/null || true

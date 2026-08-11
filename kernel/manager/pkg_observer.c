@@ -121,7 +121,17 @@ int ksu_observer_init(void)
 
 void __exit ksu_observer_exit(void)
 {
+	if (!g || IS_ERR(g))
+		return;
+
 	unwatch_one_dir(&g_watch);
+	/*
+	 * fsnotify_destroy_mark() queues final mark destruction on a global
+	 * workqueue.  The callback still references ksu_ops, so an LKM must wait
+	 * for that work before its text and static data can be unloaded.
+	 */
+	fsnotify_wait_marks_destroyed();
 	fsnotify_put_group(g);
+	g = NULL;
 	pr_info("observer exit done\n");
 }
