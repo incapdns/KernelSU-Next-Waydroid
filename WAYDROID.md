@@ -34,9 +34,9 @@ SELinux decoupling or `ksud late-load`; those adaptations remain necessary.
 
 The GitHub release is the recommended installation path. It contains all three
 matching artifacts: the Arch package (including `kernelsu.ko`, the patched
-x86_64 `ksud`, loader and timer), the Manager APK and a standalone copy of the
-module. The package is tied to the kernel release shown in its release notes;
-check before installing:
+x86_64 `ksud`, loader and timer), the officially signed **spoofed Manager** APK
+and a standalone copy of the module. The package is tied to the kernel release
+shown in its release notes; check before installing:
 
 ```sh
 uname -r
@@ -93,23 +93,29 @@ The required result is
 
 ## Matching Manager
 
-Install the official, non-spoofed KernelSU Next `dev` Manager built by the
-upstream CI for commit `234f6e040fcbca18b16d2398e1aa225712ec99ad` before
-testing this kernel. The matching artifact is
-`KernelSU_Next_v3.3.0-25-g234f6e04_33239-release.apk`; it contains the x86_64
-`ksud` from that same commit and uses UAPI version 2, exactly like the kernel.
-Its APK v2 certificate is the identity compiled into the module:
+Install the official **spoofed** KernelSU Next `dev` Manager built by the
+upstream CI for commit `234f6e040fcbca18b16d2398e1aa225712ec99ad`. The
+matching artifact is
+`KernelSU_Next_v3.3.0-25-g234f6e04-spoofed_33239-release.apk`; it contains the
+x86_64 `ksud` from that same commit and uses UAPI version 2, exactly like the
+kernel. Upstream changes its package ID to a randomized value while preserving
+the official APK signing identity compiled into the module:
 
 ```text
 certificate size:   998 (0x3e6)
 certificate SHA256: 79e590113c4c4c0c222978e413a5faa801666957b1212a328e46c00c69821bf7
 ```
 
-The verified APK is included in this repository's GitHub release. A Manager
+The spoofed and ordinary upstream APKs have been verified to share that exact
+certificate. The spoofed APK is included in this repository's GitHub release
+and avoids exposing the well-known `com.rifsxd.ksunext` package name. A Manager
 built in an unrelated fork without the official signing secret has a different
-certificate and will intentionally not be crowned by the kernel. A custom
-Manager remains possible, but requires compiling the kernel with that custom
-APK certificate's size and SHA-256.
+certificate and will intentionally not be crowned by the kernel.
+
+If the ordinary Manager is already installed, install the spoofed APK first,
+open it and confirm that it reports **Rooted**, then remove the ordinary
+`com.rifsxd.ksunext` app. Keeping both installed leaves the known package name
+visible to application scanners.
 
 ## Package and install
 
@@ -139,7 +145,7 @@ On a fresh installation, wait until Android reports that user 0 is ready, then
 install the matching Manager (skip this command when it is already installed):
 
 ```sh
-waydroid app install ./KernelSU_Next_*-release.apk
+waydroid app install ./KernelSU_Next_*-spoofed_*-release.apk
 ```
 
 Always stop both the Android session and container before unloading the kernel
