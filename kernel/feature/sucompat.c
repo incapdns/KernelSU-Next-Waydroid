@@ -20,6 +20,7 @@
 #include "klog.h" // IWYU pragma: keep
 #include "runtime/ksud.h"
 #include "feature/sucompat.h"
+#include "hook/syscall_hook_manager.h"
 #include "policy/app_profile.h"
 #include "hook/syscall_hook.h"
 #include "sulog/event.h"
@@ -86,13 +87,30 @@ static bool is_ksud_exists()
 	return true;
 }
 
+static bool sucompat_uid_allowed(void)
+{
+    uid_t uid = current_uid().val;
+
+    if (ksu_is_allow_uid_for_current(uid))
+        return true;
+
+#ifdef CONFIG_KSU_NON_ANDROID
+    /* KernelSU WebUI commands already run as root, but their shell is not in
+     * the private KSU SELinux domain. Permit the virtual /system/bin/su only
+     * inside the PID namespace positively identified as Waydroid. */
+    if (uid == 0 && ksu_is_waydroid_task(current))
+        return true;
+#endif
+    return false;
+}
+
 long ksu_handle_faccessat_sucompat(int orig_nr, struct pt_regs *regs)
 {
 	const char __user **filename_user, *orig_filename;
 	long ret;
 	const struct cred *old_cred;
 
-	if (!ksu_is_allow_uid_for_current(current_uid().val)) {
+	if (!sucompat_uid_allowed()) {
 		goto do_orig_facessat;
 	}
 
@@ -128,7 +146,7 @@ long ksu_handle_stat_sucompat(int orig_nr, struct pt_regs *regs)
 	long ret;
 	const struct cred *old_cred;
 
-	if (!ksu_is_allow_uid_for_current(current_uid().val)) {
+	if (!sucompat_uid_allowed()) {
 		goto do_orig_stat;
 	}
 
@@ -173,7 +191,7 @@ long ksu_handle_execve_sucompat(const char __user **filename_user, int orig_nr, 
 	if (unlikely(!filename_user))
 		goto do_orig_execve;
 
-	if (!ksu_is_allow_uid_for_current(current_uid().val))
+	if (!sucompat_uid_allowed())
 		goto do_orig_execve;
 
 	addr = untagged_addr((unsigned long)*filename_user);

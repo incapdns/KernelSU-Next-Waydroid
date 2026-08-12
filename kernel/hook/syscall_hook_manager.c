@@ -26,6 +26,7 @@
 #include "hook/setuid_hook.h"
 #include "hook/syscall_hook.h"
 #include "hook/syscall_event_bridge.h"
+#include "policy/allowlist.h"
 #include "runtime/ksud.h"
 
 #ifdef CONFIG_KRETPROBES
@@ -113,9 +114,22 @@ static struct kretprobe *syscall_unregfunc_rp = NULL;
 #ifdef CONFIG_KSU_NON_ANDROID
 static bool waydroid_trace_enabled = true;
 static pid_t waydroid_init_host_pid;
+static struct pid_namespace *waydroid_pid_ns;
+static DEFINE_SPINLOCK(waydroid_state_lock);
 static bool sys_enter_registered;
 static bool sched_exec_registered;
 static bool sched_exit_registered;
+
+bool ksu_is_waydroid_task(struct task_struct *task)
+{
+    struct pid_namespace *active_ns = task_active_pid_ns(task);
+    bool matches;
+
+    spin_lock(&waydroid_state_lock);
+    matches = waydroid_trace_enabled && waydroid_pid_ns == active_ns;
+    spin_unlock(&waydroid_state_lock);
+    return matches;
+}
 
 static void ksu_waydroid_exec(void *data, struct task_struct *task,
                               pid_t old_pid, struct linux_binprm *bprm)
@@ -129,8 +143,17 @@ static void ksu_waydroid_exec(void *data, struct task_struct *task,
         return;
 
     if (task_pid_vnr(task) == 1 && !strcmp(path, "/system/bin/init")) {
+        struct pid_namespace *old_ns;
+        struct pid_namespace *new_ns = get_pid_ns(task_active_pid_ns(task));
+
+        spin_lock(&waydroid_state_lock);
+        old_ns = waydroid_pid_ns;
+        waydroid_pid_ns = new_ns;
         waydroid_init_host_pid = task_pid_nr(task);
         waydroid_trace_enabled = true;
+        spin_unlock(&waydroid_state_lock);
+        if (old_ns)
+            put_pid_ns(old_ns);
         ksu_set_task_tracepoint_flag(task);
         pr_info("hook_manager: Waydroid init started as host pid %d\n",
                 waydroid_init_host_pid);
@@ -149,6 +172,14 @@ static void ksu_waydroid_exec(void *data, struct task_struct *task,
         strstr(path, "/stub_zygote") || !strcmp(path, KSUD_PATH))
         return;
 
+    /* KernelSU WebUI forks a privileged /system/bin/sh which then invokes
+     * /system/bin/su. Keep the dispatcher mark across that exec, but only for
+     * root or explicitly allowlisted UIDs inside the registered Waydroid
+     * namespace. Ordinary Android applications remain outside our syscall
+     * path after exec. */
+    if (task_uid(task).val == 0 || ksu_is_allow_uid(task_uid(task).val))
+        return;
+
     ksu_clear_task_tracepoint_flag_if_needed(task);
     pr_info("hook_manager: unmark %d after successful exec %s\n",
             task->pid, path);
@@ -161,12 +192,25 @@ static void ksu_waydroid_exit(void *data, struct task_struct *task,
 static void ksu_waydroid_exit(void *data, struct task_struct *task)
 #endif
 {
+    struct pid_namespace *old_ns;
+
     if (task_pid_nr(task) != waydroid_init_host_pid)
         return;
 
+    spin_lock(&waydroid_state_lock);
     waydroid_trace_enabled = false;
     waydroid_init_host_pid = 0;
+    old_ns = waydroid_pid_ns;
+    waydroid_pid_ns = NULL;
+    spin_unlock(&waydroid_state_lock);
+    if (old_ns)
+        put_pid_ns(old_ns);
     pr_info("hook_manager: Waydroid init stopped\n");
+}
+#else
+bool ksu_is_waydroid_task(struct task_struct *task)
+{
+    return false;
 }
 #endif
 
@@ -176,8 +220,7 @@ static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
     if (unlikely(ksu_syscall_unload_prepared()))
         return;
 #ifdef CONFIG_KSU_NON_ANDROID
-    if (unlikely(!waydroid_trace_enabled ||
-                 task_active_pid_ns(current) == &init_pid_ns))
+    if (unlikely(!ksu_is_waydroid_task(current)))
         return;
 #endif
 #if defined(__x86_64__)
@@ -259,7 +302,9 @@ void __exit ksu_syscall_hook_manager_exit(void)
 {
     pr_emerg("exit: hook manager begin\n");
 #ifdef CONFIG_KSU_NON_ANDROID
+    spin_lock(&waydroid_state_lock);
     waydroid_trace_enabled = false;
+    spin_unlock(&waydroid_state_lock);
 #endif
 
 #ifdef CONFIG_KRETPROBES
@@ -289,6 +334,20 @@ void __exit ksu_syscall_hook_manager_exit(void)
 #endif
     tracepoint_synchronize_unregister();
     pr_emerg("exit: tracepoints removed and synchronized\n");
+#endif
+
+#ifdef CONFIG_KSU_NON_ANDROID
+    {
+        struct pid_namespace *old_ns;
+
+        spin_lock(&waydroid_state_lock);
+        waydroid_init_host_pid = 0;
+        old_ns = waydroid_pid_ns;
+        waydroid_pid_ns = NULL;
+        spin_unlock(&waydroid_state_lock);
+        if (old_ns)
+            put_pid_ns(old_ns);
+    }
 #endif
 
     ksu_unregister_syscall_hook(__NR_setresuid);
