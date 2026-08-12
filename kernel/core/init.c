@@ -84,6 +84,59 @@ module_param(allow_shell, bool, 0);
 bool ksu_no_custom_rc = false;
 module_param_named(norc, ksu_no_custom_rc, bool, 0);
 
+#if defined(MODULE) && defined(__x86_64__) &&                         \
+    defined(CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER)
+static bool unload_guard_held;
+static bool prepare_unload;
+
+static int ksu_param_set_prepare_unload(const char *val,
+                                        const struct kernel_param *kp)
+{
+    bool requested;
+    int ret;
+
+    ret = kstrtobool(val, &requested);
+    if (ret)
+        return ret;
+    if (!requested)
+        return -EINVAL;
+    if (READ_ONCE(prepare_unload))
+        return 0;
+
+    ret = ksu_syscall_hook_prepare_unload();
+    if (ret)
+        return ret;
+
+    WRITE_ONCE(prepare_unload, true);
+
+    /* This is the sole self-reference acquired after successful init.  Drop
+     * it only after all global x86 entry points have been restored.  The
+     * sysfs write returns completely to userspace before delete_module is
+     * issued by the loader helper. */
+    if (xchg(&unload_guard_held, false))
+        module_put(THIS_MODULE);
+
+    pr_emerg("prepare unload: module guard released\n");
+    return 0;
+}
+
+static int ksu_param_get_prepare_unload(char *buffer,
+                                        const struct kernel_param *kp)
+{
+    return sysfs_emit(buffer, "%c\n",
+                      READ_ONCE(prepare_unload) ? 'Y' : 'N');
+}
+
+static const struct kernel_param_ops ksu_prepare_unload_ops = {
+    .set = ksu_param_set_prepare_unload,
+    .get = ksu_param_get_prepare_unload,
+};
+
+module_param_cb(prepare_unload, &ksu_prepare_unload_ops, NULL, 0600);
+MODULE_PARM_DESC(prepare_unload,
+                 "Detach x86 syscall patches before unloading the module");
+#endif
+
 int __init kernelsu_init(void)
 {
 #if defined(__x86_64__) && !defined(CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER)
@@ -196,21 +249,38 @@ int __init kernelsu_init(void)
 	kobject_del(&THIS_MODULE->mkobj.kobj);
 #endif
 #endif
-	return 0;
+
+#if defined(MODULE) && defined(__x86_64__) &&                         \
+    defined(CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER)
+    /* Raw rmmod must fail safely until userspace explicitly detaches the
+     * global dispatcher through prepare_unload. */
+    __module_get(THIS_MODULE);
+    WRITE_ONCE(unload_guard_held, true);
+    pr_info("x86 unload guard armed\n");
+#endif
+    return 0;
 }
 
 void __exit kernelsu_exit(void)
 {
+	pr_emerg("exit: KernelSU teardown begin\n");
 	// Phase 1: Stop all hooks first to prevent new callbacks
 	ksu_syscall_hook_manager_exit();
 
 	ksu_supercalls_exit();
+	pr_emerg("exit: supercalls removed\n");
 
 	if (!ksu_late_loaded)
 		ksu_ksud_exit();
+	pr_emerg("exit: ksud hooks and work drained\n");
 
 	// Wait for any in-flight RCU readers (e.g. handler traversing allow_list)
 	synchronize_rcu();
+	pr_emerg("exit: RCU readers drained\n");
+	/* Syscall, kprobe and task callbacks may have observed module-owned
+	 * function pointers before their entry points were unregistered. */
+	synchronize_rcu_tasks();
+	pr_emerg("exit: RCU tasks drained\n");
 
 	// Phase 2: Now safe to release data structures
 	ksu_observer_exit();
@@ -232,6 +302,7 @@ void __exit kernelsu_exit(void)
 	ksu_feature_exit();
 
 	put_cred(ksu_cred);
+	pr_emerg("exit: KernelSU teardown complete\n");
 }
 
 #if NEED_OWN_STACKPROTECTOR

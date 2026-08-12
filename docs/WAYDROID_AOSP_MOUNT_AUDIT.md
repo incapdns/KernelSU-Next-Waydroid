@@ -17,6 +17,10 @@ following files from that exact tag:
 - `platform/system/core/rootdir/init-debug.rc`
 - `device/generic/goldfish/init.ranchu.rc`
 - `device/generic/goldfish/fstab.ranchu.x86`
+- `platform/system/apex/apexd/apexd.cpp`
+- `platform/system/vold/Utils.cpp`
+- `platform/system/vold/VolumeManager.cpp`
+- `platform/system/vold/model/EmulatedVolume.cpp`
 
 The observed side is `/proc/self/mountinfo` read in the mount and PID namespace
 of the running Waydroid init. `/proc/mounts` alone is not sufficient because it
@@ -25,13 +29,26 @@ does not expose mount propagation or the bind source root.
 This document distinguishes an exact mount from a container substitution. A
 substitution is never called exact merely because it looks similar.
 
+The exact checked-out source revisions behind the tag are:
+
+- `platform/system/core`: `2522744341869220b36240eb2232e07daff4d46a`
+- `platform/system/apex`: `21056d928eee3f91db5c019e47cc35850fa7a892`
+- `platform/system/vold`: `cff5efa2106c322f6fb674b38c2fbdfff839a467`
+- `device/generic/goldfish`: `7493b6b8d8aeed860ff2415e8327af2ed97324fe`
+
+The closed-world category emitted by the verifier is part of the assertion:
+a target with a known mismatch must be categorized as a divergence and can
+never increase an `AOSP_*_EXACT` count. In particular, `/dev/pts` remains a
+divergence until its effective mount and `/dev/ptmx` topology pass every
+literal check below.
+
 ## Literal first-stage mounts
 
 | Target | Literal AOSP r75 request | Effective Waydroid state | Result |
 |---|---|---|---|
-| `/dev` | `tmpfs`, `MS_NOSUID`, `mode=0755` | `tmpfs`, `rw,nosuid`, `mode=0755`; kernel-added `relatime,inode64,huge=advise` | Exact explicit AOSP flags; extra values are kernel serialization/defaults on the host kernel |
+| `/dev` | `tmpfs`, `MS_NOSUID`, `mode=0755` | `tmpfs`, `rw,nosuid`, root mode `01777`; kernel-added `relatime,inode64,huge=advise` | Not literal: Waydroid's host-context `hwcomposer` creates `/dev/input/wl_*` after Wayland seat discovery and loses that ability with mode `0755`. An A/B runtime test proved `0755` removes mouse/keyboard while `01777` restores them |
 | `/dev/pts` | `devpts`, flags `0`, data `NULL` | `devpts`, `rw,nosuid,noexec`, `gid=5,mode=620,ptmxmode=666,max=10` | Not literal; LXC owns the PTY allocation and imposes its isolation options |
-| `/proc` | `proc`, flags `0`, `hidepid=2,gid=3009` | Before fix: no `hidepid` or `gid`; after hook: `rw,nosuid,nodev,noexec`, `gid=3009,hidepid=invisible` | Corrected. Linux serializes numeric `hidepid=2` as `hidepid=invisible` |
+| `/proc` | `proc`, flags `0`, `hidepid=2,gid=3009` | `rw` with no `nosuid,nodev,noexec`; `gid=3009,hidepid=invisible` | Literal. Linux serializes numeric `hidepid=2` as `hidepid=invisible` |
 | `/sys` | `sysfs`, flags `0`, data `NULL` | `sysfs`, `ro` | Not literal. Making the shared host sysfs writable would grant Android writes against the host kernel and hardware; there is no mount-namespace-only equivalent for a global sysfs instance |
 | `/sys/fs/selinux` | `selinuxfs`, flags `0`, data `NULL` | Absent because SELinux is disabled in the host kernel command line/runtime | Not reproducible while SELinux is disabled; a fake mount would not be equivalent |
 | `/mnt` | `tmpfs`, `MS_NOEXEC|MS_NOSUID|MS_NODEV`, `mode=0755,uid=0,gid=1000` | Same filesystem, flags, mode, UID and GID | Exact |
@@ -50,7 +67,7 @@ separately from this mount table.
 | `/linkerconfig` | same as `/apex` | Same | Exact |
 | `/linkerconfig` bootstrap bind | bind-recursive `/linkerconfig/bootstrap` over `/linkerconfig` | Mount root is `/bootstrap` from the same tmpfs | Exact |
 | `/sys/kernel/tracing` | `tracefs`, `gid=3012` | `tracefs`, `rw,gid=3012` | Exact |
-| `/sys/kernel/debug` | conditional `debugfs`; unmounted at boot completion unless explicitly retained | Mounted `debugfs,rw`; `ro.debuggable=0` and no AOSP debugfs-restrictions property are set, while Waydroid explicitly keeps it for WebView tracing | Deliberate Waydroid divergence, not the final state selected by this image's AOSP properties |
+| `/sys/kernel/debug` | mounted only when `ro.product.debugfs_restrictions.enabled=true`, then normally unmounted at boot completion | Absent; the LXC-added debugfs is removed before Android init because this image does not define the enabling property | Corrected to the literal property-selected state |
 | `/config` | `configfs`, `nodev,noexec,nosuid` | Same | Exact |
 | `/dev/binderfs` | `binder`, `stats=global`, followed by binder device symlinks | No `/dev/binderfs`; three binder devices are host binderfs bind mounts at `/dev/{binder,hwbinder,vndbinder}` | Container substitution, not literal; required by Waydroid's host binder architecture |
 | `/sys/fs/fuse/connections` | `fusectl`, no explicit flags/data | Same | Exact explicit AOSP request |
@@ -67,10 +84,12 @@ separately from this mount table.
 | `/data_mirror/cur_profiles` | recursive bind of `/data/misc/profiles/cur` | Same | Exact bind relationship |
 | `/data_mirror/ref_profiles` | recursive bind of `/data/misc/profiles/ref` | Same | Exact bind relationship |
 
-APEX package mounts are dynamic outputs of `apexd`, not hard-coded mount
-requests in `first_stage_init.cpp`. The running APEX mounts are read-only, as
-expected. Their backing source is the Waydroid system overlay instead of an
-Android block device.
+This image uses flattened APEX. In `system/apex` r75,
+`ActivateFlattenedApex()` literally bind-mounts each built-in directory with
+`MS_BIND`; it does not use the loop/verity flags used by packaged APEX files.
+All 25 running `/apex/com.android.*` mounts have roots below `/system/apex` and
+are therefore the exact flattened-AOSP topology. The root/system backing
+overlay remains a Waydroid partition substitution.
 
 ## x86_64 emulator fstab versus Waydroid storage substitution
 
@@ -115,8 +134,14 @@ functionality.
 `/usr/lib/kernelsu-next-waydroid/aosp-mount-hook` is registered as an
 `lxc.hook.mount`. LXC documents that this hook executes inside the container's
 mount namespace after automatic mounts and before `pivot_root`. It remounts
-only the container procfs with the literal Android 13 data options and fails
-container startup if the effective mount does not report them.
+only the container namespace. It restores the literal Android 13 procfs flags
+and data options, applies the fstab-compatible `/data` VFS flags, closes the
+writable vendor bind holes and removes the property-disabled debugfs mount.
+
+The verifier is closed-world: every runtime `mountinfo` row must map to an
+explicit AOSP request, an AOSP dynamic subsystem (`apexd` or `vold`), or a
+named Waydroid/LXC architectural substitution. An unknown mount fails the
+audit. Use `--verbose` to print the category assigned to every row.
 
 Run the verifier after each Waydroid update:
 

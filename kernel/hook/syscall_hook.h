@@ -32,6 +32,15 @@ void ksu_unregister_syscall_hook(int nr);
 // Check if a handler is registered in the dispatcher for syscall @nr.
 bool ksu_has_syscall_hook(int nr);
 
+/* Stop tracepoint routing as soon as a loadable x86 module begins detaching
+ * its global dispatcher. */
+bool ksu_syscall_unload_prepared(void);
+
+/* Restore every module-owned syscall entry and the x86 dispatcher patch while
+ * the module is still pinned.  This must complete in a userspace operation
+ * before delete_module() is attempted. */
+int ksu_syscall_hook_prepare_unload(void);
+
 // --- Direct syscall table patching API (hook/unhook) ---
 // Directly overwrite syscall_table[@nr] with @fn using fixmap + stop_machine.
 // Saves the original handler to *@old (if non-NULL) and records the entry

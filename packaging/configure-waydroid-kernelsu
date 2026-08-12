@@ -11,6 +11,7 @@ backup=${profile}.pre-kernelsu
 container_config=/var/lib/waydroid/lxc/waydroid/config
 container_config_backup=${container_config}.pre-kernelsu
 aosp_mount_hook=/usr/lib/kernelsu-next-waydroid/aosp-mount-hook
+pre_start_hook=/usr/lib/kernelsu-next-waydroid/pre-start-hook
 
 if [[ ! -f $profile ]]; then
     echo "${0##*/}: Waydroid seccomp profile not found: $profile" >&2
@@ -39,6 +40,10 @@ if [[ ! -x $aosp_mount_hook ]]; then
     echo "${0##*/}: AOSP mount hook not installed: $aosp_mount_hook" >&2
     exit 1
 fi
+if [[ ! -x $pre_start_hook ]]; then
+    echo "${0##*/}: KernelSU pre-start hook not installed: $pre_start_hook" >&2
+    exit 1
+fi
 if [[ ! -e $container_config_backup ]]; then
     install -o root -g root -m 0644 "$container_config" "$container_config_backup"
 fi
@@ -51,6 +56,27 @@ else
         "$hook_line" >> "$container_config"
     echo "${0##*/}: configured Android 13 AOSP procfs mount options."
 fi
+
+pre_start_line="lxc.hook.pre-start = $pre_start_hook"
+if grep -Fqx "$pre_start_line" "$container_config"; then
+    echo "${0##*/}: KernelSU pre-start hook is already configured."
+else
+    printf '\n# Reset KernelSU one-shot Android boot hooks before every container init.\n%s\n' \
+        "$pre_start_line" >> "$container_config"
+    echo "${0##*/}: configured KernelSU pre-start reset."
+fi
+
+# Keep the start-host /dev/pts finalizer available only as an experimental
+# diagnostic helper.  It must not be enabled automatically until the literal
+# devpts replacement has passed the complete Android runtime regression suite.
+sed -i '\|^lxc\.hook\.start-host = /usr/lib/kernelsu-next-waydroid/aosp-start-host-hook$|d' \
+    "$container_config"
+
+# A start-host input hook is intentionally forbidden. Creating Wayland FIFOs
+# before Android second-stage init makes init block while opening a FIFO before
+# its peer exists. The Waydroid hwcomposer owns their lifecycle.
+sed -i '\|^lxc\.hook\.start-host = /usr/lib/kernelsu-next-waydroid/input-start-host-hook$|d' \
+    "$container_config"
 
 echo "${0##*/}: original profile backup: $backup"
 echo "${0##*/}: original container config backup: $container_config_backup"

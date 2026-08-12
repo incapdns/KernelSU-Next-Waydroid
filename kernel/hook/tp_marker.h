@@ -32,6 +32,15 @@ static inline void ksu_clear_task_tracepoint_flag(struct task_struct *t)
 #endif
 }
 
+static inline bool ksu_task_tracepoint_flag_is_set(struct task_struct *t)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+    return test_task_syscall_work(t, SYSCALL_TRACEPOINT);
+#else
+    return test_tsk_thread_flag(t, TIF_SYSCALL_TRACEPOINT);
+#endif
+}
+
 void ksu_clear_task_tracepoint_flag_if_needed(struct task_struct *t);
 
 // Used by syscall_hook_manager kretprobe handlers

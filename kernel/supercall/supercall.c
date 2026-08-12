@@ -91,6 +91,7 @@ static void ksu_install_fd_tw_func(struct callback_head *cb)
     }
 
     kfree(tw);
+    module_put(THIS_MODULE);
 }
 
 static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
@@ -113,7 +114,12 @@ static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
         tw->outp = (int __user *)arg4;
         tw->cb.func = ksu_install_fd_tw_func;
 
+        if (!try_module_get(THIS_MODULE)) {
+            kfree(tw);
+            return 0;
+        }
         if (task_work_add(current, &tw->cb, TWA_RESUME)) {
+            module_put(THIS_MODULE);
             kfree(tw);
             pr_warn("install fd add task_work failed\n");
         }

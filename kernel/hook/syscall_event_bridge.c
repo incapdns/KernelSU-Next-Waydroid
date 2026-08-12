@@ -2,6 +2,7 @@
 #include "linux/cred.h"
 #include "linux/jump_label.h"
 #include "linux/printk.h"
+#include "linux/string.h"
 #include "selinux/selinux.h"
 #include <asm/syscall.h>
 #include <linux/ptrace.h>
@@ -47,10 +48,12 @@ static int ksu_handle_init_mark_tracker(const char __user **filename_user)
         if (ksu_install_fd_for_exec() < 0)
             pr_err("hook_manager: failed to install inheritable ksud fd\n");
 #endif
+#ifndef CONFIG_KSU_NON_ANDROID
     } else if (likely(strstr(path, "/app_process") == NULL && strstr(path, "/adbd") == NULL &&
                       strstr(path, "/stub_zygote") == NULL)) {
         pr_info("hook_manager: unmark %d exec %s\n", current->pid, path);
         ksu_clear_task_tracepoint_flag_if_needed(current);
+#endif
     }
 
     return 0;

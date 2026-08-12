@@ -44,6 +44,9 @@ init_start=$(android_shell "awk '{print \$22}' /proc/1/stat" 2>/dev/null | tail 
 previous=$(android_shell \
     'test -f /data/adb/ksu/.waydroid_late_load && cat /data/adb/ksu/.waydroid_late_load || true' \
     2>/dev/null | tail -n1)
+completion_marker=$(android_shell \
+    'test -f /data/adb/ksu/.waydroid_late_load_complete && cat /data/adb/ksu/.waydroid_late_load_complete || true' \
+    2>/dev/null | tail -n1)
 
 # A module can be installed after the boot's first late-load. Do not let the
 # per-container completion marker suppress the follow-up run that promotes it
@@ -51,9 +54,20 @@ previous=$(android_shell \
 had_pending_updates=$(android_shell \
     'test -d /data/adb/modules_update && test -n "$(ls -A /data/adb/modules_update 2>/dev/null)" && echo yes || true' \
     2>/dev/null || true)
-[[ $previous != "$init_start" || $had_pending_updates == *yes* || $ksud_was_missing == *yes* ]] || exit 0
+[[ $previous != "$init_start" || $completion_marker != "$init_start" ||
+   $had_pending_updates == *yes* || $ksud_was_missing == *yes* ]] || exit 0
 
-manager_package=com.rifsxd.ksunext
+manager_package=$(android_shell '
+    for package in $(pm list packages -3 | sed "s/^package://"); do
+        apk=$(pm path "$package" 2>/dev/null | sed -n "s/^package://p" | head -n1)
+        test -n "$apk" || continue
+        if unzip -l "$apk" "lib/x86_64/libksud.so" 2>/dev/null | grep -q "lib/x86_64/libksud.so"; then
+            echo "$package"
+            exit 0
+        fi
+    done
+' 2>/dev/null | tail -n1)
+manager_package=${manager_package:-com.rifsxd.ksunext}
 manager_pid_before=$(android_shell "pidof '$manager_package' || true" 2>/dev/null | tail -n1)
 
 # waydroid shell inherits the container's seccomp filter, which kills the
@@ -65,15 +79,16 @@ nsenter --target "$waydroid_init_pid" \
         export PATH=/system/bin:/system/xbin:/vendor/bin:/product/bin:/apex/com.android.runtime/bin
         export ANDROID_ROOT=/system
         export ANDROID_DATA=/data
-        exec /data/adb/ksud late-load
-    '
+        exec /data/adb/ksud late-load --package-name "$1"
+    ' sh "$manager_package"
 
-# ksud daemonizes. A changed Manager PID is normally the final completion
-# signal. During a module install/update, however, Android may delay or suppress
-# the Manager restart. In that case, promotion out of modules_update proves that
-# ksud reached handle_updated_modules(), which is the point the retry service
-# must observe before it may safely stop dispatching duplicate late-load jobs.
+# ksud daemonizes, so its direct caller exits before the stages finish. The
+# patched daemon writes init's start time after all blocking stages. A Manager
+# PID change is retained only as a compatibility fallback for an older daemon.
 for _ in $(seq 1 90); do
+    completion_marker=$(android_shell \
+        'test -f /data/adb/ksu/.waydroid_late_load_complete && cat /data/adb/ksu/.waydroid_late_load_complete || true' \
+        2>/dev/null | tail -n1)
     manager_pid_after=$(android_shell "pidof '$manager_package' || true" 2>/dev/null | tail -n1)
     updates_promoted=
     if [[ $had_pending_updates == *yes* ]]; then
@@ -82,7 +97,8 @@ for _ in $(seq 1 90); do
             2>/dev/null || true)
         [[ $updates_pending != *yes* ]] && updates_promoted=yes
     fi
-    if [[ ( $had_pending_updates == *yes* && $updates_promoted == yes ) ||
+    if [[ $completion_marker == "$init_start" ||
+          ( $had_pending_updates == *yes* && $updates_promoted == yes ) ||
           ( $had_pending_updates != *yes* && -n $manager_pid_after && $manager_pid_after != "$manager_pid_before" ) ]]; then
         # Manager startup may restore the APK-embedded daemon. Make our patched
         # binary the persistent copy after observing that restart.

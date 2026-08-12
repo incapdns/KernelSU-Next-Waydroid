@@ -22,7 +22,25 @@ log "rootfs=$LXC_ROOTFS_MOUNT proc=$proc_mount data=$data_mount"
     exit 1
 }
 
-mount -t proc -o remount,rw,nosuid,nodev,noexec,hidepid=2,gid=3009 proc "$proc_mount"
+# first_stage_init.cpp passes mount flags 0 for proc. LXC initially adds
+# nosuid,nodev,noexec; explicitly clear those VFS flags as well as applying the
+# literal Android data options. This audit targets equivalence, not a merely
+# stricter-looking approximation.
+mount -t proc -o remount,rw,suid,dev,exec,hidepid=2,gid=3009 proc "$proc_mount"
+
+# Do not change the LXC-created /dev root from 01777 to AOSP's literal 0755.
+# Waydroid's hwcomposer runs outside Android's root context and creates the
+# /dev/input/wl_* FIFOs only after learning the Wayland seat capabilities.
+# A 0755 root prevents that mkdir, removing mouse and keyboard input. This is a
+# proven Waydroid architectural divergence, not an exact AOSP mount.
+
+# init-debug.rc mounts debugfs only when the product property is exactly true.
+# This image does not define that property, while LXC adds debugfs
+# unconditionally. Remove the container-side mount before Android init.
+debug_mount=$LXC_ROOTFS_MOUNT/sys/kernel/debug
+if mountpoint -q "$debug_mount"; then
+    umount "$debug_mount"
+fi
 
 # fstab.ranchu.x86 for the matching AOSP build requests noatime,nosuid,nodev
 # for /data. Waydroid supplies /data as a host bind mount, so apply the VFS
@@ -63,6 +81,15 @@ case ",$mountinfo," in
     *,hidepid=2,*|*,hidepid=invisible,*) ;;
     *) echo "${0##*/}: effective proc mount lacks hidepid=2: $mountinfo" >&2; exit 1 ;;
 esac
+proc_vfs_options=$(awk -v target="$proc_mount" '$5 == target { print $6; exit }' /proc/self/mountinfo)
+for forbidden in nosuid nodev noexec; do
+    case ",$proc_vfs_options," in
+        *,"$forbidden",*)
+            echo "${0##*/}: effective proc mount has non-AOSP flag $forbidden: $proc_vfs_options" >&2
+            exit 1
+            ;;
+    esac
+done
 
 data_mountinfo=$(awk -v target="$data_mount" '$5 == target { print $6; exit }' /proc/self/mountinfo)
 for required in noatime nosuid nodev; do

@@ -3,6 +3,8 @@ use log::{info, warn};
 use rustix::cstr;
 use std::process::Command;
 
+const WAYDROID_LATE_LOAD_COMPLETE: &str = "/data/adb/ksu/.waydroid_late_load_complete";
+
 use crate::module::{handle_updated_modules, prune_modules};
 use crate::{assets, defs, init_event, metamodule, restorecon, utils};
 
@@ -131,6 +133,19 @@ pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Res
     // 14. Execute boot-completed stage scripts (non-blocking)
     init_event::run_stage("boot-completed", false);
 
+    // The host-side Waydroid dispatcher cannot use this daemonized process'
+    // exit status as a completion signal. Publish init's start time only after
+    // every blocking late-load stage has completed. This also distinguishes a
+    // stale marker from a previous container boot without relying on a Manager
+    // process restart.
+    if let Ok(stat) = std::fs::read_to_string("/proc/1/stat") {
+        if let Some(init_start) = stat.split_whitespace().nth(21) {
+            if let Err(e) = std::fs::write(WAYDROID_LATE_LOAD_COMPLETE, format!("{init_start}\n")) {
+                warn!("write Waydroid late-load completion marker failed: {e}");
+            }
+        }
+    }
+
     // 15. Restart Manager so it gets a fresh ksu fd from the newly loaded kernel module
     info!("Restarting KernelSU Next Manager {package_name}...");
     let _ = Command::new("am").args(["force-stop", package_name]).status();
@@ -139,6 +154,19 @@ pub fn run(package_name: &String, kmi: Option<String>, allow_shell: bool) -> Res
             "start",
             "-n",
             &format!("{package_name}/com.rifsxd.ksunext.ui.MainActivity"),
+        ])
+        .status();
+
+    // A spoofed Manager keeps its launcher intent but may no longer resolve
+    // under the original explicit component package. Ask PackageManager to
+    // launch the package's actual MAIN/LAUNCHER activity as a fallback.
+    let _ = Command::new("monkey")
+        .args([
+            "-p",
+            package_name,
+            "-c",
+            "android.intent.category.LAUNCHER",
+            "1",
         ])
         .status();
 

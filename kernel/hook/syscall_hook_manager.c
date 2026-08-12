@@ -18,6 +18,7 @@
 #endif
 
 #include "arch.h"
+#include "ksu.h"
 #include "klog.h" // IWYU pragma: keep
 #include "hook/syscall_hook_manager.h"
 #include "hook/tp_marker.h"
@@ -25,6 +26,7 @@
 #include "hook/setuid_hook.h"
 #include "hook/syscall_hook.h"
 #include "hook/syscall_event_bridge.h"
+#include "runtime/ksud.h"
 
 #ifdef CONFIG_KRETPROBES
 
@@ -118,15 +120,38 @@ static bool sched_exit_registered;
 static void ksu_waydroid_exec(void *data, struct task_struct *task,
                               pid_t old_pid, struct linux_binprm *bprm)
 {
-    if (task_pid_vnr(task) != 1 ||
-        strcmp(bprm->filename, "/system/bin/init"))
+    const char *path = bprm->filename;
+
+    /* This tracepoint runs only after exec has committed. Failed PATH probes
+     * never arrive here and therefore cannot accidentally disable KernelSU
+     * handling for the following /system/bin/su attempt. */
+    if (task_active_pid_ns(task) == &init_pid_ns)
         return;
 
-    waydroid_init_host_pid = task_pid_nr(task);
-    waydroid_trace_enabled = true;
-    ksu_set_task_tracepoint_flag(task);
-    pr_info("hook_manager: Waydroid init started as host pid %d\n",
-            waydroid_init_host_pid);
+    if (task_pid_vnr(task) == 1 && !strcmp(path, "/system/bin/init")) {
+        waydroid_init_host_pid = task_pid_nr(task);
+        waydroid_trace_enabled = true;
+        ksu_set_task_tracepoint_flag(task);
+        pr_info("hook_manager: Waydroid init started as host pid %d\n",
+                waydroid_init_host_pid);
+        return;
+    }
+
+    /* sched_process_exec is global. Ignore tasks which KernelSU did not mark,
+     * both to preserve other tracepoint users and to avoid duplicate logs
+     * after a task has already been removed from our syscall path. */
+    if (!ksu_task_tracepoint_flag_is_set(task))
+        return;
+
+    /* These executables are roots of Android process trees or KernelSU's own
+     * userspace. Their descendants must inherit syscall dispatch marking. */
+    if (strstr(path, "/app_process") || strstr(path, "/adbd") ||
+        strstr(path, "/stub_zygote") || !strcmp(path, KSUD_PATH))
+        return;
+
+    ksu_clear_task_tracepoint_flag_if_needed(task);
+    pr_info("hook_manager: unmark %d after successful exec %s\n",
+            task->pid, path);
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
@@ -148,6 +173,8 @@ static void ksu_waydroid_exit(void *data, struct task_struct *task)
 // sys_enter handler: redirect hooked syscalls to the dispatcher
 static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
 {
+    if (unlikely(ksu_syscall_unload_prepared()))
+        return;
 #ifdef CONFIG_KSU_NON_ANDROID
     if (unlikely(!waydroid_trace_enabled ||
                  task_active_pid_ns(current) == &init_pid_ns))
@@ -230,10 +257,21 @@ void __init ksu_syscall_hook_manager_init(void)
 
 void __exit ksu_syscall_hook_manager_exit(void)
 {
-    pr_info("hook_manager: ksu_hook_manager_exit called\n");
-#ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
+    pr_emerg("exit: hook manager begin\n");
 #ifdef CONFIG_KSU_NON_ANDROID
     waydroid_trace_enabled = false;
+#endif
+
+#ifdef CONFIG_KRETPROBES
+    /* unregister_trace_* invokes syscall_unregfunc(). Remove our observers
+     * first so teardown cannot re-enter task marking while unregistering. */
+    destroy_kretprobe(&syscall_regfunc_rp);
+    destroy_kretprobe(&syscall_unregfunc_rp);
+    pr_emerg("exit: tracepoint observer kretprobes removed\n");
+#endif
+
+#ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
+#ifdef CONFIG_KSU_NON_ANDROID
     if (sys_enter_registered) {
         unregister_trace_sys_enter(ksu_sys_enter_handler, NULL);
         sys_enter_registered = false;
@@ -250,12 +288,7 @@ void __exit ksu_syscall_hook_manager_exit(void)
     unregister_trace_sys_enter(ksu_sys_enter_handler, NULL);
 #endif
     tracepoint_synchronize_unregister();
-    pr_info("hook_manager: sys_enter tracepoint unregistered\n");
-#endif
-
-#ifdef CONFIG_KRETPROBES
-    destroy_kretprobe(&syscall_regfunc_rp);
-    destroy_kretprobe(&syscall_unregfunc_rp);
+    pr_emerg("exit: tracepoints removed and synchronized\n");
 #endif
 
     ksu_unregister_syscall_hook(__NR_setresuid);
@@ -264,8 +297,10 @@ void __exit ksu_syscall_hook_manager_exit(void)
     ksu_unregister_syscall_hook(__NR_faccessat);
 
     ksu_syscall_hook_exit();
+    pr_emerg("exit: syscall dispatcher restored\n");
 
     ksu_sucompat_exit();
     ksu_setuid_hook_exit();
     ksu_avc_spoof_exit();
+    pr_emerg("exit: hook manager complete\n");
 }

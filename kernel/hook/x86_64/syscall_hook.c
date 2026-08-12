@@ -32,6 +32,13 @@ struct syscall_hook_entry {
 static DEFINE_MUTEX(hooked_entries_lock);
 static struct syscall_hook_entry hooked_entries[16];
 static int hooked_count = 0;
+static DEFINE_MUTEX(unload_prepare_lock);
+static bool unload_prepared;
+
+bool ksu_syscall_unload_prepared(void)
+{
+    return READ_ONCE(unload_prepared);
+}
 
 static int patch_syscall_table(int nr, sys_call_ptr_t fn)
 {
@@ -300,6 +307,7 @@ void __init __nocfi ksu_syscall_hook_init(void)
     int ni_slot;
 
     memset(syscall_hooks, 0, sizeof(syscall_hooks));
+    WRITE_ONCE(unload_prepared, false);
 
     ksu_syscall_table = (sys_call_ptr_t *)ksu_resolve_symbol_for_functable_hook("sys_call_table");
     pr_info("sys_call_table=0x%lx\n", (unsigned long)ksu_syscall_table);
@@ -332,49 +340,84 @@ void __init __nocfi ksu_syscall_hook_init(void)
     pr_info("dispatcher installed at slot %d\n", ksu_dispatcher_nr);
 }
 
-void __exit ksu_syscall_hook_exit(void)
+int ksu_syscall_hook_prepare_unload(void)
 {
     int i;
+    int result = 0;
+
+    mutex_lock(&unload_prepare_lock);
+    if (unload_prepared)
+        goto out;
+
+    /* Prevent sys_enter from redirecting any new syscall while its shared
+     * dispatcher slot and the direct boot hooks are being restored. */
+    WRITE_ONCE(unload_prepared, true);
+
+    if (ksu_syscall_table) {
+        mutex_lock(&hooked_entries_lock);
+        for (i = 0; i < hooked_count; i++) {
+            int nr = hooked_entries[i].nr;
+            sys_call_ptr_t orig = hooked_entries[i].orig;
+
+            pr_info("prepare unload: restore syscall %d to 0x%lx\n", nr,
+                    (unsigned long)orig);
+            if (ksu_patch_text(&ksu_syscall_table[nr], &orig, sizeof(orig),
+                               KSU_PATCH_TEXT_FLUSH_DCACHE)) {
+                pr_err("prepare unload: restore syscall %d failed\n", nr);
+                result = -EIO;
+                break;
+            }
+        }
+        if (!result)
+            hooked_count = 0;
+        mutex_unlock(&hooked_entries_lock);
+    }
 
 #ifdef CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER
-    int ret;
-    if (x64_sys_call_patch_addr) {
+    if (!result && x64_sys_call_patch_addr) {
+        int ret;
+
         ret = ksu_patch_text((void *)x64_sys_call_patch_addr, x64_sys_call_patch_orig_insn,
                              sizeof(x64_sys_call_patch_orig_insn), KSU_PATCH_TEXT_FLUSH_ICACHE);
         if (ret) {
             pr_err("restore x64_sys_call err: %d\n", ret);
+            result = ret;
         }
     }
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)
-    if (do_syscall_64_patch_addr) {
+    if (!result && do_syscall_64_patch_addr) {
+        int ret;
+
         ret = ksu_patch_text((void *)do_syscall_64_patch_addr, do_syscall_64_orig_insn, sizeof(do_syscall_64_orig_insn),
                              KSU_PATCH_TEXT_FLUSH_ICACHE);
         if (ret) {
-            pr_err("restore x64_sys_call err: %d\n", ret);
+            pr_err("restore do_syscall_64 err: %d\n", ret);
+            result = ret;
         }
     }
 #endif
 #endif
+
+    if (result)
+        WRITE_ONCE(unload_prepared, false);
+    else
+        pr_emerg("prepare unload: global x86 syscall patches detached\n");
+
+out:
+    mutex_unlock(&unload_prepare_lock);
+    return result;
+}
+
+void __exit ksu_syscall_hook_exit(void)
+{
+    int ret = ksu_syscall_hook_prepare_unload();
+
+    if (ret)
+        pr_emerg("exit: syscall patch restoration failed: %d\n", ret);
 
     if (!ksu_syscall_table)
         goto clear_state;
-
-    // First, restore all patched syscall table entries while the dispatcher
-    // and hook table are still intact, so in-flight syscalls see valid state.
-    mutex_lock(&hooked_entries_lock);
-    for (i = 0; i < hooked_count; i++) {
-        int nr = hooked_entries[i].nr;
-        sys_call_ptr_t orig = hooked_entries[i].orig;
-
-        pr_info("restore syscall %d to 0x%lx\n", nr, (unsigned long)orig);
-        if (ksu_patch_text(&ksu_syscall_table[nr], &orig, sizeof(orig),
-                           KSU_PATCH_TEXT_FLUSH_DCACHE)) {
-            pr_err("restore syscall %d failed\n", nr);
-        }
-    }
-    hooked_count = 0;
-    mutex_unlock(&hooked_entries_lock);
 
 clear_state:
     // Now that the syscall table is restored, clear internal state.

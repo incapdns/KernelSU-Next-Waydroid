@@ -23,6 +23,16 @@ fi
 
 if [[ ${1:-} == --unload-first || ${1:-} == -d ]]; then
     if grep -q '^kernelsu ' /proc/modules; then
+        prepare_unload=/sys/module/kernelsu/parameters/prepare_unload
+        if [[ ! -w $prepare_unload ]]; then
+            echo "${0##*/}: loaded module has no safe prepare_unload control; reboot required." >&2
+            exit 2
+        fi
+        printf '1\n' > "$prepare_unload"
+        if [[ $(<"$prepare_unload") != Y ]]; then
+            echo "${0##*/}: KernelSU refused safe unload preparation." >&2
+            exit 3
+        fi
         rmmod kernelsu
     fi
 fi

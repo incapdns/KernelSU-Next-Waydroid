@@ -200,6 +200,16 @@ bool ksu_has_syscall_hook(int nr)
     return READ_ONCE(syscall_hooks[nr]) != NULL;
 }
 
+bool ksu_syscall_unload_prepared(void)
+{
+    return false;
+}
+
+int ksu_syscall_hook_prepare_unload(void)
+{
+    return 0;
+}
+
 void __init ksu_syscall_hook_init(void)
 {
     int ni_slot;

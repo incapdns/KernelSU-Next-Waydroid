@@ -18,6 +18,7 @@
 #include <asm/pgtable.h>
 #include <asm/page.h>
 #include <asm/fixmap.h>
+#include <asm/sync_core.h>
 
 // --- Architecture-specific Page Table to Physical Address translation ---
 #define KSU_P4D_TO_PHYS(p4d) ((unsigned long)p4d_pfn(p4d) << PAGE_SHIFT)
@@ -109,7 +110,6 @@ fail:
 // --- Architecture-specific Cache Flushing & Barriers ---
 #define ksu_flush_dcache(start, sz) do {} while (0)
 #define ksu_flush_icache(start, end) do {} while (0)
-#define ksu_isb() smp_mb()
 
 struct patch_text_info {
     void *dst;
@@ -167,7 +167,14 @@ static int ksu_patch_text_cb(void *arg)
 
     int ret = 0;
 
-    /* The last CPU becomes master */
+    /*
+     * The last CPU becomes the writer.  stop_machine() prevents concurrent
+     * execution while the bytes are changed, but x86 CPUs must still
+     * serialize their instruction streams before any of them can execute the
+     * modified text.  This is especially important while restoring a patched
+     * syscall dispatcher during module unload: stale prefetched instructions
+     * could otherwise branch back into module text after it has been freed.
+     */
     if (atomic_inc_return(&pp->cpu_count) == num_online_cpus()) {
         ret = ksu_patch_text_nosync(dst, src, len, flags);
         /* Notify other processors with an additional increment. */
@@ -175,8 +182,10 @@ static int ksu_patch_text_cb(void *arg)
     } else {
         while (atomic_read(&pp->cpu_count) <= num_online_cpus())
             cpu_relax();
-        ksu_isb();
     }
+
+    /* Required on every CPU, including the CPU which wrote the new text. */
+    sync_core();
 
     return ret;
 }

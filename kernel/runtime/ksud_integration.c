@@ -53,6 +53,8 @@ static void stop_init_rc_hook();
 static void stop_execve_hook();
 
 static struct work_struct stop_input_hook_work;
+static bool input_hook_registered;
+static bool input_hook_stop_requested;
 
 #define MAX_ARG_STRINGS 0x7FFFFFFF
 struct user_arg_ptr {
@@ -148,7 +150,6 @@ fail:
 
 void ksu_handle_execveat_ksud(const char *path, struct user_arg_ptr *argv)
 {
-    static const char app_process[] = "/system/bin/app_process";
     static bool first_zygote = true;
 
     /* This applies to versions Android 10+ */
@@ -168,7 +169,12 @@ void ksu_handle_execveat_ksud(const char *path, struct user_arg_ptr *argv)
         }
     }
 
-    if (unlikely(first_zygote && !memcmp(path, app_process, sizeof(app_process) - 1) && argv)) {
+    /* Android init uses an ABI-specific executable on current releases. Older
+     * releases and some vendor images use the unsuffixed compatibility path. */
+    if (unlikely(first_zygote && argv &&
+                 (!strcmp(path, "/system/bin/app_process") ||
+                  !strcmp(path, "/system/bin/app_process32") ||
+                  !strcmp(path, "/system/bin/app_process64")))) {
         char buf[16];
         if (check_argv(*argv, 1, "-Xzygote", buf, sizeof(buf))) {
             pr_info("exec zygote, /data prepared, second_stage: %d\n", init_second_stage_executed);
@@ -611,7 +617,10 @@ static struct kprobe input_event_kp = {
 
 static void do_stop_input_hook(struct work_struct *work)
 {
-    unregister_kprobe(&input_event_kp);
+    if (input_hook_registered) {
+        unregister_kprobe(&input_event_kp);
+        input_hook_registered = false;
+    }
 }
 
 static void stop_init_rc_hook()
@@ -623,11 +632,10 @@ static void stop_init_rc_hook()
 
 void ksu_stop_input_hook_runtime(void)
 {
-    static bool input_hook_stopped = false;
-    if (input_hook_stopped) {
+    if (input_hook_stop_requested) {
         return;
     }
-    input_hook_stopped = true;
+    input_hook_stop_requested = true;
     bool ret = schedule_work(&stop_input_hook_work);
     pr_info("unregister input kprobe: %d!\n", ret);
 }
@@ -641,6 +649,8 @@ void __init ksu_ksud_init()
     ksu_syscall_table_hook(__NR_fstat, ksu_sys_fstat, &orig_sys_fstat);
 
     ret = register_kprobe(&input_event_kp);
+    input_hook_registered = (ret == 0);
+    input_hook_stop_requested = false;
     pr_info("ksud: input_event_kp: %d\n", ret);
 
     INIT_WORK(&stop_input_hook_work, do_stop_input_hook);
@@ -648,10 +658,14 @@ void __init ksu_ksud_init()
 
 void __exit ksu_ksud_exit()
 {
-    // TODO:
-    // this should be done before unregister vfs_read_kp
-    // stop_init_rc_hook();
-    unregister_kprobe(&input_event_kp);
+    /* Prevent new entries into module text before draining asynchronous work.
+     * cancel_work_sync() also waits if the unregister work is already running. */
+    stop_init_rc_hook();
+    cancel_work_sync(&stop_input_hook_work);
+    if (input_hook_registered) {
+        unregister_kprobe(&input_event_kp);
+        input_hook_registered = false;
+    }
 
     if (module_rc_buf) {
         free_module_rc();
