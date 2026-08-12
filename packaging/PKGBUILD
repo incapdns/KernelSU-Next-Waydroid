@@ -1,6 +1,6 @@
 pkgname=kernelsu-next-waydroid
 pkgver=3.3.0.dev.r3239
-pkgrel=36
+pkgrel=37
 pkgdesc='KernelSU Next dev host module for Waydroid on CachyOS x86_64'
 arch=('x86_64')
 license=('GPL-2.0-only')
@@ -8,7 +8,6 @@ depends=('modloader' 'waydroid' 'util-linux')
 conflicts=('kernelsu-dkms' 'kernelsu-waydroid-current')
 provides=('kernelsu-dkms')
 options=('!strip')
-makedepends=('gcc')
 install=kernelsu-next-waydroid.install
 source=()
 sha256sums=()
@@ -34,15 +33,8 @@ package() {
         "$pkgdir/usr/lib/kernelsu-next-waydroid/aosp-mount-hook"
     install -Dm0755 "$repo_root/packaging/kernelsu-waydroid-pre-start-hook" \
         "$pkgdir/usr/lib/kernelsu-next-waydroid/pre-start-hook"
-    gcc -O2 -Wall -Wextra -Werror \
-        "$repo_root/packaging/kernelsu-waydroid-aosp-start-host.c" \
-        -o "$srcdir/aosp-start-host-hook"
-    install -Dm0755 "$srcdir/aosp-start-host-hook" \
-        "$pkgdir/usr/lib/kernelsu-next-waydroid/aosp-start-host-hook"
     install -Dm0755 "$repo_root/userspace/ksud/target/x86_64-linux-android/release/ksud" \
         "$pkgdir/usr/lib/kernelsu-next-waydroid/ksud-x86_64"
     install -Dm0644 "$repo_root/packaging/kernelsu-waydroid-late-load.service" \
         "$pkgdir/usr/lib/systemd/system/kernelsu-waydroid-late-load.service"
-    install -Dm0644 "$repo_root/packaging/kernelsu-waydroid-late-load.timer" \
-        "$pkgdir/usr/lib/systemd/system/kernelsu-waydroid-late-load.timer"
 }

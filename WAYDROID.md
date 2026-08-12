@@ -233,10 +233,11 @@ daemon, so the loader restores the package-matched `ksud` into Waydroid's
 `rmmod`, `modprobe -r`, or `load-kernelsu --unload-first` while Waydroid is
 running.
 
-The late-load helper and unit remain installed for manual recovery of an
-already-running container. The periodic timer is intentionally inactive:
-late-load occurs after Zygote and therefore cannot replace the normal
-pre-Zygote `post-fs-data` contract required by Zygisk modules.
+The late-load helper and static unit remain installed for manual recovery of
+an already-running container. Invoke that recovery explicitly with
+`sudo systemctl start kernelsu-waydroid-late-load.service`. There is no
+periodic timer: late-load occurs after Zygote and therefore cannot replace the
+normal pre-Zygote `post-fs-data` contract required by Zygisk modules.
 
 ### Verification
 
