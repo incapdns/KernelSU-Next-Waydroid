@@ -6,19 +6,22 @@ log() {
 }
 trap 'status=$?; log "failed at line $LINENO with status $status"' ERR
 
-# lxc.hook.pre-start runs in the host namespace before the container init exists.
-# Loading is idempotent: unloading a live external module merely to restart an
-# Android container is unsafe and is not required by the Waydroid exec tracker.
+# lxc.hook.pre-start runs in the host namespace after the previous container
+# has stopped and before the next Android init exists. KernelSU boot stages are
+# one-shot per module load, so every new container init requires a fresh module
+# lifecycle for post-fs-data and pre-Zygote modules such as Zygisk Next.
 exec 9>/run/kernelsu-waydroid-pre-start.lock
 flock 9
 
 if grep -q '^kernelsu ' /proc/modules; then
-    log "KernelSU is already loaded; preserving the live module"
-    exit 0
+    log "resetting KernelSU safely before Waydroid init"
+    timeout --signal=TERM --kill-after=5s 30s \
+        /usr/bin/load-kernelsu --unload-first
+else
+    log "loading KernelSU before Waydroid init"
+    timeout --signal=TERM --kill-after=5s 30s /usr/bin/load-kernelsu
 fi
 
-log "loading KernelSU before Waydroid init"
-timeout --signal=TERM --kill-after=5s 30s /usr/bin/load-kernelsu
 grep -q '^kernelsu ' /proc/modules || {
     echo "${0##*/}: kernelsu module is not loaded" >&2
     exit 1

@@ -204,10 +204,12 @@ install the matching Manager (skip this command when it is already installed):
 waydroid app install ./KernelSU_Next_*-spoofed_*-release.apk
 ```
 
-The LXC pre-start hook loads KernelSU only when it is not already present. It
-never unloads a live module during an ordinary Waydroid restart. Android init
-then executes the genuine blocking `post-fs-data` action before
-`app_process64` starts.
+The LXC pre-start hook resets KernelSU before every new Waydroid container
+init. If the module is already loaded it uses the guarded
+`load-kernelsu --unload-first` sequence; otherwise it performs a normal load.
+This reset is required because KernelSU's boot stages are one-shot per module
+load. Android init can then execute the genuine blocking `post-fs-data` action
+before `app_process64` starts on every container restart.
 
 On x86_64 this build retains KernelSU Next's
 `KSU_X86_PATCH_SYSCALL_DISPATCHER`. A raw `rmmod kernelsu` is intentionally
