@@ -6,7 +6,8 @@ kernel_build=${KERNEL_BUILD:-/usr/lib/modules/${kernel_release}/build}
 repo_root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 output_dir=${OUTPUT_DIR:-${repo_root}/kernel/out-waydroid}
 ksu_git_version=$(git -C "$repo_root" rev-list --count HEAD)
-ksu_git_tag=$(git -C "$repo_root" describe --tags --abbrev=0)
+ksu_git_tag=$(git -C "$repo_root" describe --tags --abbrev=0 2>/dev/null || \
+    git -C "$repo_root" rev-parse --short HEAD)
 build_root=$(mktemp -d /tmp/kernelsu-next-waydroid.XXXXXX)
 source_dir=${build_root}/kernel
 

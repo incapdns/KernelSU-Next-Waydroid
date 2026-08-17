@@ -1,6 +1,7 @@
 pkgname=kernelsu-next-waydroid
-pkgver=3.3.0.dev.r3239
-pkgrel=39
+pkgver=$(git -C "$(realpath "$startdir/..")" describe --tags --long --always | \
+    sed -E 's/^v//; s/-([0-9]+)-g/.r\1.g/; s/[^[:alnum:].]+/./g')
+pkgrel=1
 pkgdesc='KernelSU Next dev host module for Waydroid on CachyOS x86_64'
 arch=('x86_64')
 license=('GPL-2.0-only')
@@ -16,19 +17,28 @@ package() {
     local repo_root module kernel_release
     repo_root=$(realpath "$startdir/..")
     module="$repo_root/kernel/out-waydroid/kernelsu.ko"
-    [[ -f $module ]] || return 1
+    [[ -f $module ]] || {
+        error "missing $module; run ./waydroid-kernelsu package"
+        return 1
+    }
+    [[ -x $repo_root/userspace/ksud/target/x86_64-linux-android/release/ksud ]] || {
+        error "missing Android x86_64 ksud; run ./waydroid-kernelsu package"
+        return 1
+    }
     kernel_release=$(modinfo -F vermagic "$module" | awk '{print $1}')
 
     install -Dm0644 "$module" \
         "$pkgdir/usr/lib/modules/$kernel_release/updates/kernelsu.ko"
+    install -Dm0755 "$repo_root/waydroid-kernelsu" \
+        "$pkgdir/usr/bin/waydroid-kernelsu"
     install -Dm0755 "$repo_root/packaging/load-kernelsu" \
-        "$pkgdir/usr/bin/load-kernelsu"
+        "$pkgdir/usr/lib/kernelsu-next-waydroid/load-module"
     install -Dm0755 "$repo_root/packaging/configure-waydroid-kernelsu" \
-        "$pkgdir/usr/bin/configure-waydroid-kernelsu"
+        "$pkgdir/usr/lib/kernelsu-next-waydroid/configure"
     install -Dm0755 "$repo_root/packaging/kernelsu-waydroid-late-load" \
-        "$pkgdir/usr/bin/kernelsu-waydroid-late-load"
+        "$pkgdir/usr/lib/kernelsu-next-waydroid/late-load"
     install -Dm0755 "$repo_root/packaging/kernelsu-waydroid-aosp-mount-audit" \
-        "$pkgdir/usr/bin/kernelsu-waydroid-aosp-mount-audit"
+        "$pkgdir/usr/lib/kernelsu-next-waydroid/audit"
     install -Dm0755 "$repo_root/packaging/kernelsu-waydroid-aosp-mount-hook" \
         "$pkgdir/usr/lib/kernelsu-next-waydroid/aosp-mount-hook"
     install -Dm0755 "$repo_root/packaging/kernelsu-waydroid-pre-start-hook" \

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if (( EUID != 0 )); then
-    echo "${0##*/}: execute como root." >&2
+    echo "${0##*/}: run as root." >&2
     exit 1
 fi
 
@@ -13,7 +13,7 @@ if [[ -z $module_path ]]; then
         -iname 'kernelsu.ko*' -print -quit 2>/dev/null || true)
 fi
 if [[ -z $module_path ]]; then
-    echo "${0##*/}: kernelsu.ko não existe para ${kernel_release}." >&2
+    echo "${0##*/}: kernelsu.ko does not exist for ${kernel_release}." >&2
     exit 1
 fi
 

@@ -7,9 +7,9 @@ log() {
 trap 'status=$?; log "failed at line $LINENO with status $status"' ERR
 
 # LXC runs this hook in the container mount namespace after lxc.mount.auto has
-# mounted procfs and before pivot_root starts Android init. Android 13's own
-# first_stage_init would mount procfs with these exact data options, but under
-# Waydroid LXC owns that first mount.
+# mounted procfs and before pivot_root starts Android init. AOSP
+# first_stage_init remounts procfs with these exact data options, but under
+# Waydroid LXC owns the initial mount.
 : "${LXC_ROOTFS_MOUNT:?LXC_ROOTFS_MOUNT is not set by LXC}"
 
 proc_mount=$LXC_ROOTFS_MOUNT/proc

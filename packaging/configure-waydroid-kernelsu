@@ -49,12 +49,15 @@ if [[ ! -e $container_config_backup ]]; then
 fi
 
 hook_line="lxc.hook.mount = $aosp_mount_hook"
+sed -i \
+    's/# Restore Android 13 first_stage_init procfs security inside the container namespace./# Restore AOSP first_stage_init procfs security inside the container namespace./' \
+    "$container_config"
 if grep -Fqx "$hook_line" "$container_config"; then
     echo "${0##*/}: AOSP mount hook is already configured."
 else
-    printf '\n# Restore Android 13 first_stage_init procfs security inside the container namespace.\n%s\n' \
+    printf '\n# Restore AOSP first_stage_init procfs security inside the container namespace.\n%s\n' \
         "$hook_line" >> "$container_config"
-    echo "${0##*/}: configured Android 13 AOSP procfs mount options."
+    echo "${0##*/}: configured AOSP procfs mount options."
 fi
 
 pre_start_line="lxc.hook.pre-start = $pre_start_hook"

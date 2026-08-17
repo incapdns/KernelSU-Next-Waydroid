@@ -1,12 +1,16 @@
 # KernelSU Next for Waydroid x86_64
 
-This repository tracks the KernelSU Next `dev` branch and adapts its official
-`KSU_X86_PATCH_SYSCALL_DISPATCHER` path to a CachyOS host running Android in
-Waydroid.
+KernelSU Next adapted to an x86_64 Waydroid container sharing the host kernel.
+The project builds an external `kernelsu.ko` module and an Android `ksud`; it
+does not rebuild the full kernel.
 
-See [WAYDROID.md](WAYDROID.md) for the retained container adaptations, the
-old workarounds removed by the upstream dispatcher, build instructions and
-the Arch package/systemd integration for `ksud late-load`.
+The workflow is exposed through one command:
 
-The upstream project and general documentation remain at
-[KernelSU-Next/KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next).
+```sh
+./waydroid-kernelsu package
+sudo ./waydroid-kernelsu install
+sudo waydroid-kernelsu configure
+```
+
+See [WAYDROID.md](WAYDROID.md) for architecture, requirements, safe unload,
+internal hooks, and runtime verification.

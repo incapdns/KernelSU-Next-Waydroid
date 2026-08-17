@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+program=${0##*/}
+libexec_dir=/usr/lib/kernelsu-next-waydroid
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+if [[ -d $script_dir/kernel && -f $script_dir/packaging/PKGBUILD ]]; then
+    repo_root=$script_dir
+else
+    repo_root=
+fi
+
+usage() {
+    cat <<EOF
+Usage: $program <command>
+
+Source checkout:
+  build       build kernelsu.ko and Android x86_64 ksud
+  package     build both artifacts and create the Arch package
+  install     install the newest generated Arch package (run as root)
+
+Installed system:
+  configure   configure Waydroid seccomp and LXC hooks (run as root)
+  reload      reload the module using the safe sequence (run as root)
+  audit       verify the container's effective mounts (run as root)
+  recover     run manual late-load in a running container (run as root)
+  status      show the module, Waydroid, hooks and installed ksud
+EOF
+}
+
+die() {
+    echo "$program: $*" >&2
+    exit 1
+}
+
+require_source() {
+    [[ -n $repo_root ]] || die "this command must run from the project checkout."
+}
+
+require_root() {
+    (( EUID == 0 )) || die "run this command as root."
+}
+
+private_command() {
+    local installed_name=$1 source_name=$2
+    shift 2
+    if [[ -x $libexec_dir/$installed_name ]]; then
+        exec "$libexec_dir/$installed_name" "$@"
+    fi
+    [[ -n $repo_root && -x $repo_root/packaging/$source_name ]] || \
+        die "internal component is not installed: $installed_name"
+    exec "$repo_root/packaging/$source_name" "$@"
+}
+
+build_module() {
+    "$repo_root/kernel/build-waydroid-cachyos.sh"
+}
+
+build_ksud() {
+    local ndk_root=${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}
+    local candidate prebuilt api=${KSU_ANDROID_API:-26}
+
+    command -v cargo >/dev/null || die "Cargo is not installed."
+    if [[ -z $ndk_root ]]; then
+        for candidate in /opt/android-ndk /opt/android-sdk/ndk/*; do
+            if [[ -x $candidate/toolchains/llvm/prebuilt/linux-x86_64/bin/clang ]]; then
+                ndk_root=$candidate
+            fi
+        done
+    fi
+    [[ -n $ndk_root ]] || die \
+        "Android NDK was not found; install android-ndk or set ANDROID_NDK_HOME."
+
+    prebuilt=$ndk_root/toolchains/llvm/prebuilt/linux-x86_64
+    [[ -x $prebuilt/bin/x86_64-linux-android${api}-clang ]] || die \
+        "Android NDK does not provide the x86_64 API ${api} compiler."
+
+    export ANDROID_NDK_HOME=$ndk_root
+    export ANDROID_NDK_ROOT=$ndk_root
+    export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$prebuilt/bin/x86_64-linux-android${api}-clang
+    export CC_x86_64_linux_android=$CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER
+    export CXX_x86_64_linux_android=$prebuilt/bin/x86_64-linux-android${api}-clang++
+    export BINDGEN_EXTRA_CLANG_ARGS_x86_64_linux_android="--sysroot=$prebuilt/sysroot -I$prebuilt/sysroot/usr/include/x86_64-linux-android -I$prebuilt/sysroot/usr/include"
+
+    cargo build \
+        --target x86_64-linux-android \
+        --release \
+        --manifest-path "$repo_root/userspace/ksud/Cargo.toml"
+}
+
+build_all() {
+    require_source
+    build_module
+    build_ksud
+}
+
+newest_package() {
+    local candidate newest=
+    local -a packages
+
+    require_source
+    shopt -s nullglob
+    packages=("$repo_root"/packaging/kernelsu-next-waydroid-*.pkg.tar.*)
+    shopt -u nullglob
+    ((${#packages[@]})) || die "no generated package was found; run '$program package' first."
+    for candidate in "${packages[@]}"; do
+        if [[ -z $newest || $candidate -nt $newest ]]; then
+            newest=$candidate
+        fi
+    done
+    printf '%s\n' "$newest"
+}
+
+show_status() {
+    local config=/var/lib/waydroid/lxc/waydroid/config
+    local module_path
+
+    if grep -q '^kernelsu ' /proc/modules; then
+        echo "KernelSU: loaded"
+    else
+        echo "KernelSU: not loaded"
+    fi
+    module_path=$(modinfo -n kernelsu 2>/dev/null || true)
+    echo "Module for $(uname -r): ${module_path:-not installed}"
+    echo "Packaged ksud: $([[ -x $libexec_dir/ksud-x86_64 ]] && echo installed || echo missing)"
+    if command -v waydroid >/dev/null; then
+        waydroid status 2>/dev/null || echo "Waydroid: unavailable"
+    else
+        echo "Waydroid: command not installed"
+    fi
+    if [[ -f $config ]] && \
+       grep -Fq "$libexec_dir/pre-start-hook" "$config" && \
+       grep -Fq "$libexec_dir/aosp-mount-hook" "$config"; then
+        echo "LXC hooks: configured"
+    else
+        echo "LXC hooks: not configured"
+    fi
+}
+
+command_name=${1:-help}
+shift || true
+case $command_name in
+    build)
+        (($# == 0)) || die "build does not accept arguments."
+        build_all
+        ;;
+    package)
+        (($# == 0)) || die "package does not accept arguments."
+        build_all
+        (cd "$repo_root/packaging" && makepkg -f)
+        echo "Package ready: $(newest_package)"
+        ;;
+    install)
+        (($# == 0)) || die "install does not accept arguments."
+        require_source
+        require_root
+        package_file=$(newest_package)
+        pacman -U -- "$package_file"
+        ;;
+    configure)
+        require_root
+        private_command configure configure-waydroid-kernelsu "$@"
+        ;;
+    reload)
+        require_root
+        private_command load-module load-kernelsu --unload-first "$@"
+        ;;
+    audit)
+        require_root
+        private_command audit kernelsu-waydroid-aosp-mount-audit "$@"
+        ;;
+    recover)
+        require_root
+        private_command late-load kernelsu-waydroid-late-load "$@"
+        ;;
+    status)
+        (($# == 0)) || die "status does not accept arguments."
+        show_status
+        ;;
+    help|-h|--help)
+        usage
+        ;;
+    *)
+        usage >&2
+        die "unknown command: $command_name"
+        ;;
+esac

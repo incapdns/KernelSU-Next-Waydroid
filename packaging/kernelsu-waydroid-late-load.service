@@ -5,4 +5,4 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/kernelsu-waydroid-late-load
+ExecStart=/usr/lib/kernelsu-next-waydroid/late-load

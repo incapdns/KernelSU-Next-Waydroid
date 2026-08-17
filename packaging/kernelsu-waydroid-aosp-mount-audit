@@ -15,7 +15,20 @@ waydroid_init_pid=$(lxc-info -P /var/lib/waydroid/lxc -n waydroid -pH 2>/dev/nul
 mountinfo_file=$(mktemp /tmp/kernelsu-waydroid-mountinfo.XXXXXX)
 trap 'rm -f -- "$mountinfo_file"' EXIT
 nsenter --target "$waydroid_init_pid" --mount --pid --root --wd -- \
-    cat /proc/self/mountinfo > "$mountinfo_file"
+    /system/bin/cat /proc/self/mountinfo > "$mountinfo_file"
+
+container_getprop() {
+    nsenter --target "$waydroid_init_pid" --mount --pid --root --wd -- \
+        /system/bin/getprop "$1" 2>/dev/null | tr -d '\r'
+}
+
+android_sdk=$(container_getprop ro.build.version.sdk)
+[[ $android_sdk =~ ^[0-9]+$ ]] || {
+    echo "${0##*/}: could not determine the Android SDK level." >&2
+    exit 1
+}
+apex_updatable=$(container_getprop ro.apex.updatable)
+printf 'Android SDK: %s; updatable APEX: %s\n' "$android_sdk" "${apex_updatable:-false}"
 
 read_mountinfo() {
     awk -v target="$1" '$5 == target { print; exit }' "$mountinfo_file"
@@ -128,7 +141,7 @@ check_every_target_option() {
 check_stat() {
     local mountpoint=$1 expected_mode=$2 expected_uid=$3 expected_gid=$4 actual
     actual=$(nsenter --target "$waydroid_init_pid" --mount --pid --root --wd -- \
-        stat -c '%a %u %g' "$mountpoint" 2>/dev/null || true)
+        /system/bin/stat -c '%a %u %g' "$mountpoint" 2>/dev/null || true)
     if [[ $actual == "$expected_mode $expected_uid $expected_gid" ]]; then
         printf 'PASS %-24s mode=%s uid=%s gid=%s\n' \
             "$mountpoint" "$expected_mode" "$expected_uid" "$expected_gid"
@@ -142,7 +155,7 @@ check_stat() {
 check_char_device() {
     local path=$1 expected_major=$2 expected_minor=$3 actual
     actual=$(nsenter --target "$waydroid_init_pid" --mount --pid --root --wd -- \
-        sh -c 'test -c "$1" && stat -c "%t %T" "$1"' sh "$path" \
+        /system/bin/sh -c 'test -c "$1" && /system/bin/stat -c "%t %T" "$1"' sh "$path" \
         2>/dev/null || true)
     if [[ $actual == "$expected_major $expected_minor" ]]; then
         printf 'PASS %-24s char=%s:%s\n' "$path" "$expected_major" "$expected_minor"
@@ -165,6 +178,19 @@ check_fs() {
     fi
 }
 
+check_fs_one_of() {
+    local mountpoint=$1 expected_csv=$2 line actual
+    line=$(read_mountinfo "$mountpoint")
+    actual=$(awk '{ for (i = 1; i <= NF; i++) if ($i == "-") { print $(i + 1); exit } }' <<< "$line")
+    if [[ ,$expected_csv, == *,$actual,* ]]; then
+        printf 'PASS %-24s fs=%s\n' "$mountpoint" "$actual"
+    else
+        printf 'FAIL %-24s expected fs in {%s}, got fs=%s\n' \
+            "$mountpoint" "$expected_csv" "${actual:-missing}"
+        return 1
+    fi
+}
+
 check_absent() {
     local mountpoint=$1 reason=$2
     if [[ -n $(read_mountinfo "$mountpoint") ]]; then
@@ -177,11 +203,15 @@ check_absent() {
 classify_mount() {
     local target=$1
     case "$target" in
-        /proc|/mnt|/apex|/linkerconfig|/config|/sys/kernel/tracing|/sys/fs/fuse/connections|/sys/fs/bpf|/sys/fs/pstore|/data_mirror)
+        /proc|/mnt|/apex|/linkerconfig|/config|/sys/kernel/tracing|/sys/fs/fuse/connections|/sys/fs/bpf|/sys/fs/pstore|/data_mirror|/mnt/vm|/sys/kernel/security)
             printf '%s' AOSP_STATIC_EXACT ;;
         /apex/*)
-            # android-13.0.0_r75 apexd ActivateFlattenedApex(): MS_BIND.
-            printf '%s' AOSP_FLATTENED_APEX_EXACT ;;
+            if [[ $apex_updatable == true ]]; then
+                printf '%s' AOSP_PACKAGED_APEX_EXACT
+            else
+                # android-13.0.0_r75 apexd ActivateFlattenedApex(): MS_BIND.
+                printf '%s' AOSP_FLATTENED_APEX_EXACT
+            fi ;;
         /storage|/data/user/0|/data_mirror/*)
             printf '%s' AOSP_BIND_EQUIVALENT ;;
         /mnt/user/*|/mnt/installer|/mnt/installer/*|/mnt/androidwritable|/mnt/androidwritable/*|/mnt/pass_through/*|/storage/emulated|/storage/emulated/*)
@@ -193,8 +223,16 @@ classify_mount() {
             printf '%s' WAYDROID_PARTITION_SUBSTITUTION ;;
         /data)
             printf '%s' WAYDROID_DATA_SUBSTITUTION ;;
-        /dev|/dev/pts|/sys|/sys/kernel/debug)
+        /metadata)
+            printf '%s' WAYDROID_METADATA_SUBSTITUTION ;;
+        /dev|/sys|/sys/kernel/debug)
             printf '%s' SHARED_KERNEL_DIVERGENCE ;;
+        /dev/pts)
+            if (( android_sdk >= 37 )); then
+                printf '%s' AOSP_STATIC_EXACT
+            else
+                printf '%s' SHARED_KERNEL_DIVERGENCE
+            fi ;;
         /dev/binder|/dev/hwbinder|/dev/vndbinder)
             printf '%s' LXC_DEVICE_SUBSTITUTION ;;
         /dev/*)
@@ -250,12 +288,23 @@ check_option /vendor ro || failed=1
 check_every_target_option /vendor ro || failed=1
 check_option /dev nosuid || failed=1
 check_fs /dev/pts devpts || failed=1
-check_no_option /dev/pts nosuid || failed=1
-check_no_option /dev/pts nodev || failed=1
-check_no_option /dev/pts noexec || failed=1
-check_no_option /dev/pts max=10 || failed=1
-check_option /dev/pts mode=600 || failed=1
-check_option /dev/pts ptmxmode=000 || failed=1
+if (( android_sdk >= 37 )); then
+    # Android 17 remounts the existing devpts instance without legacy mount
+    # data. Its effective kernel defaults are the expected final state.
+    check_no_option /dev/pts nodev || failed=1
+    check_option /dev/pts mode=600 || failed=1
+    check_option /dev/pts ptmxmode=000 || failed=1
+else
+    # LXC owns PTY allocation on the Android 13 baseline and intentionally
+    # replaces the literal AOSP mount with Waydroid's isolation contract.
+    check_option /dev/pts nosuid || failed=1
+    check_no_option /dev/pts nodev || failed=1
+    check_option /dev/pts noexec || failed=1
+    check_option /dev/pts gid=5 || failed=1
+    check_option /dev/pts mode=620 || failed=1
+    check_option /dev/pts ptmxmode=666 || failed=1
+    check_option /dev/pts max=10 || failed=1
+fi
 check_option /sys ro || failed=1
 check_option /sys/kernel/tracing gid=3012 || failed=1
 check_root /storage /user/0 || failed=1
@@ -292,7 +341,21 @@ check_fs /data_mirror tmpfs || failed=1
 # substitutions or expected post-second-stage removals, never silent omissions.
 check_absent /sys/fs/selinux 'SELinux disabled; a fake selinuxfs is not equivalent' || failed=1
 check_absent /dev/binderfs 'host binder devices substitute for Android binderfs' || failed=1
-check_absent /metadata 'Waydroid has no Android metadata block partition' || failed=1
+if (( android_sdk >= 37 )); then
+    # Current init bind-mounts /data/metadata. Waydroid supplies the same data
+    # through its host-backed data tree instead of a metadata block partition.
+    check_root_suffix /metadata /data/metadata || failed=1
+    check_option /metadata nosuid || failed=1
+    check_option /metadata nodev || failed=1
+    check_option /metadata noatime || failed=1
+    check_fs /mnt/vm tmpfs || failed=1
+    check_option /mnt/vm nosuid || failed=1
+    check_option /mnt/vm nodev || failed=1
+    check_option /mnt/vm noexec || failed=1
+    check_fs /sys/kernel/security securityfs || failed=1
+else
+    check_absent /metadata 'Waydroid has no Android metadata block partition' || failed=1
+fi
 check_absent /debug_ramdisk 'AOSP second stage removes the transient mount' || failed=1
 check_absent /second_stage_resources 'AOSP second stage removes the transient mount' || failed=1
 check_absent /sys/kernel/debug 'init-debug.rc condition is false for this image' || failed=1
@@ -306,12 +369,23 @@ else
     failed=1
 fi
 
-# Flattened APEX is a distinct literal AOSP path: apexd bind-mounts each
-# /system/apex directory. Reject an APEX target whose source root is elsewhere.
+# APEX topology is selected by the image. Android 13 flattened APEX bind-mounts
+# /system/apex directories, while current Android uses read-only loop-backed
+# packaged APEX images. Validate the complete topology instead of assuming one.
 while IFS= read -r line; do
     target=$(awk '{ print $5 }' <<< "$line")
     root=$(awk '{ print $4 }' <<< "$line")
-    if [[ $root != /system/apex/* ]]; then
+    if [[ $apex_updatable == true ]]; then
+        source=$(awk '{ for (i = 1; i <= NF; i++) if ($i == "-") { print $(i + 2); exit } }' <<< "$line")
+        check_fs_one_of "$target" ext4,erofs || failed=1
+        check_option "$target" ro || failed=1
+        check_option "$target" nodev || failed=1
+        check_option "$target" noatime || failed=1
+        if [[ $root != / || $source != /dev/block/loop* ]]; then
+            printf 'FAIL %-52s packaged APEX root=%s source=%s\n' "$target" "$root" "$source"
+            failed=1
+        fi
+    elif [[ $root != /system/apex/* ]]; then
         printf 'FAIL %-52s flattened APEX root is %s\n' "$target" "$root"
         failed=1
     fi
@@ -335,7 +409,7 @@ for target in "${!mirror_root_suffixes[@]}"; do
     check_root_suffix "$target" "${mirror_root_suffixes[$target]}" || failed=1
 done
 
-# Android 13 vold MountUserFuse requests exactly
+# AOSP vold MountUserFuse requests exactly
 # NOSUID|NODEV|NOEXEC|NOATIME|LAZYTIME. lazytime is reported in super options.
 while IFS= read -r target; do
     check_fs "$target" fuse || failed=1

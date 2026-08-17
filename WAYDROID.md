@@ -1,254 +1,162 @@
-# KernelSU Next `dev` for Waydroid on CachyOS
+# KernelSU Next on Waydroid x86_64
 
-This branch starts from KernelSU Next `dev` commit
-`234f6e040fcbca18b16d2398e1aa225712ec99ad` and keeps the upstream x86_64
-syscall dispatcher. It does not carry the old direct-syscall tracepoint fork.
+This branch adapts KernelSU Next to the unusual case where Android runs in a
+container and shares the Linux host kernel. It tracks the upstream `dev`
+branch; an old commit is not configuration and does not need to be repeated
+when upstream moves.
 
-## Waydroid adaptations retained
+## What this project builds
 
-- detect container PID 1 executing `/system/bin/init`;
-- exclude every process in the host PID namespace;
-- mark Android init/zygote, shell and allowlisted applications;
-- discover the signed Manager while running in Waydroid's `/data/app` view;
-- load `/data/adb/ksu/.allowlist` from an Android syscall context;
-- make Android-internal SELinux integration optional for a distribution host;
-- use the caller's Android PID/mount namespace for namespace operations;
-- keep the LKM visible and unloadable;
-- unregister lifecycle/syscall tracepoints before dispatcher teardown;
-- reset KernelSU's one-shot Android boot hooks before each container init,
-  allowing the real `post-fs-data` stage to finish before the first Zygote;
-- retain `ksud late-load` as a manual recovery path, not as the normal boot
-  mechanism.
+The project produces two artifacts:
 
-## Adaptations removed because the upstream dispatcher replaces them
+- `kernel/out-waydroid/kernelsu.ko`: an external module built against the
+  headers of the exact host kernel release;
+- `userspace/ksud/target/x86_64-linux-android/release/ksud`: the daemon that
+  runs inside Android x86_64.
 
-- the custom `non_android_syscall.c` stub;
-- direct execution of setresuid/execve/stat/access handlers in `sys_enter`;
-- separate `_non_android` sucompat handlers;
-- `task_work` deferral for Manager FD installation, mount namespaces and
-  kernel unmount. The upstream dispatcher invokes these handlers from normal
-  syscall context, where sleeping operations are valid.
+It does **not rebuild the full Linux kernel**, create a `boot.img`, or modify a
+Waydroid image. The module builder invokes the installed kernel's Kbuild with
+`CONFIG_KSU=m`, `CONFIG_KSU_NON_ANDROID=y`, Android SELinux integration
+disabled, and the x86_64 syscall dispatcher enabled. Changing the host kernel
+therefore requires rebuilding and reinstalling only `kernelsu.ko` against the
+new headers.
 
-The dispatcher does not provide container isolation, `/data` discovery,
-SELinux decoupling or Waydroid lifecycle integration; those adaptations remain
-necessary.
+This differs from the KeyMint-TEE project. That project modifies `vendor.img`
+to inject the reference KeyMint service; it does not build a kernel.
 
-## Supported prebuilt package
+## What the adaptation actually does
 
-The GitHub release is the recommended installation path. It contains all three
-matching artifacts: the Arch package (including `kernelsu.ko`, the patched
-x86_64 `ksud`, loader and LXC hooks), the officially signed **spoofed Manager** APK
-and a standalone copy of the module. The package is tied to the kernel release
-shown in its release notes; check before installing:
+The following behavior was verified in the implementation, not inferred only
+from this document:
 
-```sh
-uname -r
-```
+- detects container PID 1 when it executes `/system/bin/init` and records its
+  PID namespace;
+- excludes every process in the host PID namespace from KernelSU's privileged
+  syscall path;
+- tracks Android init, Zygote, shell, Manager, and allowlisted applications;
+- discovers Manager and reads the allowlist from a syscall context where
+  `/data` refers to Android's `/data`;
+- gives `ksud` an inheritable driver file descriptor before `exec`, avoiding
+  the LXC seccomp restriction inherited by Android init;
+- makes Android's in-kernel SELinux integration optional because the module is
+  loaded into a distribution kernel;
+- safely detaches global x86_64 dispatcher patches before module removal;
+- resets KernelSU's one-shot boot hooks before each Waydroid init so that
+  `post-fs-data` runs before Zygote;
+- retains `ksud late-load` only as manual recovery for an already-running
+  container.
 
-Download the package and Manager APK from the latest
-[GitHub release](https://github.com/incapdns/KernelSU-Next-Waydroid/releases),
-then install and configure the host package:
+The patched `ksud` also publishes a marker after its blocking late-load stages
+finish and relaunches the actual Manager package, including randomized package
+names.
+
+## Why internal scripts remain
+
+`waydroid-kernelsu` is the only public command. Files below
+`/usr/lib/kernelsu-next-waydroid` are private implementations because different
+actors execute them in different contexts:
+
+- the `pre-start` hook runs on the host before the next Android init exists;
+- the `mount` hook runs in the mount namespace prepared by LXC;
+- late-load runs after boot and only for recovery;
+- the auditor is read-only and examines an existing container namespace.
+
+Merging those contexts into one large script would reduce the file count but
+would mix distinct lifecycles and privilege boundaries. The public interface
+is centralized while the necessary internal separation remains explicit.
+
+## Prebuilt package
+
+Check `uname -r` and select the package built for that exact kernel. The host
+package and its compatible, officially signed Manager are published together
+in the [latest release](https://github.com/incapdns/KernelSU-Next-Waydroid/releases/latest).
 
 ```sh
 sudo pacman -U ./kernelsu-next-waydroid-*.pkg.tar.zst
-sudo configure-waydroid-kernelsu
+sudo waydroid-kernelsu configure
+waydroid-kernelsu status
 ```
 
-The configurator registers two LXC lifecycle hooks without changing
-`waydroid-container.service`. The pre-start hook reloads KernelSU before every
-Android init, resetting its one-shot init/Zygote hooks. The mount hook runs in
-the new container namespace before Android `init`.
-For the current Android 13 `TQ3A.230901.001` image it restores the literal AOSP
-procfs policy `hidepid=2,gid=3009` and the AOSP VFS restrictions
-`noatime,nosuid,nodev` on the container's `/data` bind mount. It does not alter
-the host `/proc` or the host Btrfs mount. Verify the effective flags after a
-container restart:
+Manager must retain the official signing identity accepted by the module. The
+documentation does not duplicate a commit hash, versioned APK filename, or
+certificate: compatible artifacts belong to the same release.
 
-```bash
-sudo kernelsu-waydroid-aosp-mount-audit
-```
+## Build and package
 
-The complete source-to-runtime matrix, including every static AOSP r75 mount,
-container substitutions and non-reproducible shared-kernel mounts, is in
-[`docs/WAYDROID_AOSP_MOUNT_AUDIT.md`](docs/WAYDROID_AOSP_MOUNT_AUDIT.md).
-
-`configure-waydroid-kernelsu` removes only the exact `reboot` entry from
-Waydroid's seccomp deny list and preserves the original profile as
-`waydroid.seccomp.pre-kernelsu`. Zygisk Next needs this syscall; the rest of the
-Waydroid deny list remains unchanged.
-
-Skip directly to **Start or restart Waydroid** after using the prebuilt package.
-
-## Build from source
-
-Building from source requires both the host kernel module and an Android x86_64
-`ksud`. `makepkg` deliberately fails if either artifact is absent.
-
-First build the module for the exact running kernel:
+Build dependencies are the running kernel's headers, a module toolchain
+(`make` and Clang), Rust/Cargo managed by `rustup`, and the Android NDK. The CLI
+finds the packaged NDK automatically; Docker, Podman, and `cross` are not part
+of the build path:
 
 ```sh
-KERNEL_RELEASE=7.1.8-1-cachyos ./kernel/build-waydroid-cachyos.sh
-```
-
-The result is `kernel/out-waydroid/kernelsu.ko`. The module must match the
-running kernel's release exactly. This checkout was first validated against
-the installed CachyOS `7.1.8-1-cachyos` headers.
-
-Then build `ksud` for Android x86_64. The upstream reproducible build uses
-`cross` and requires a working Docker or Podman installation:
-
-```sh
-rustup update stable
-cargo install cross --git https://github.com/cross-rs/cross --rev 66845c1
-clang --target=aarch64-linux-gnu -c -nostdlib \
-  -o userspace/ksud/.lkm_image_bootstrap.o \
-  userspace/ksud/src/lkm_image_bootstrap.S
-CROSS_NO_WARNINGS=0 cross build \
-  --target x86_64-linux-android \
-  --release \
-  --manifest-path userspace/ksud/Cargo.toml
-```
-
-The required result is
-`userspace/ksud/target/x86_64-linux-android/release/ksud`.
-
-### Direct NDK build (without Docker/Podman)
-
-The `cross` command above is the preferred upstream-compatible path and
-provides its Android build environment itself. A direct Cargo build instead
-requires Android NDK r27 (`27.0.12077973`) and the Rust Android target. The
-following is the exact alternative used to build the packaged x86_64 daemon:
-
-```sh
+paru -S android-ndk
+rustup default stable
 rustup target add x86_64-linux-android
-
-# Set this to the installed NDK r27 directory. Avoid passing a path containing
-# spaces to bindgen: expose it through a temporary path without spaces.
-KSU_NDK_REAL="$ANDROID_SDK_ROOT/ndk/27.0.12077973"
-KSU_NDK_LINK=/tmp/kernelsu-ndk-r27
-test -e "$KSU_NDK_LINK" || ln -s "$KSU_NDK_REAL" "$KSU_NDK_LINK"
-
-KSU_NDK_PREBUILT="$KSU_NDK_LINK/toolchains/llvm/prebuilt/linux-x86_64"
-KSU_NDK_SYSROOT="$KSU_NDK_PREBUILT/sysroot"
-export ANDROID_NDK_HOME="$KSU_NDK_LINK"
-export ANDROID_NDK_ROOT="$KSU_NDK_LINK"
-export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER="$KSU_NDK_PREBUILT/bin/x86_64-linux-android35-clang"
-export CC_x86_64_linux_android="$CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER"
-export CXX_x86_64_linux_android="$KSU_NDK_PREBUILT/bin/x86_64-linux-android35-clang++"
-export BINDGEN_EXTRA_CLANG_ARGS_x86_64_linux_android="--sysroot=$KSU_NDK_SYSROOT -I$KSU_NDK_SYSROOT/usr/include/x86_64-linux-android -I$KSU_NDK_SYSROOT/usr/include"
-export LIBCLANG_PATH="$KSU_NDK_PREBUILT/musl/lib"
-
-cargo build \
-  --target x86_64-linux-android \
-  --release \
-  --manifest-path userspace/ksud/Cargo.toml
+./waydroid-kernelsu package
+sudo ./waydroid-kernelsu install
 ```
 
-This is an alternative to `cross`, not an additional mandatory step. Users
-installing a prebuilt package do not need Rust, Cargo, an NDK, Docker or
-Podman; those tools are required only when rebuilding the package from source.
+The NDK package exposes one stable path, `/opt/android-ndk`; its release number
+is not duplicated in this repository. `ANDROID_NDK_HOME` remains available for
+custom installations, and `KSU_ANDROID_API` can override the default API 26
+compiler when required.
 
-## Matching Manager
+`package` rebuilds `kernelsu.ko`, rebuilds Android x86_64 `ksud`, and runs
+`makepkg`. `install` selects only the newest matching output instead of passing
+an ambiguous wildcard with old packages to pacman. `pkgver` is evaluated directly
+from `git describe`; there is no manual version to synchronize. `pkgrel` remains
+because it is the Arch packaging revision, not a second KernelSU version.
 
-Install the official **spoofed** KernelSU Next `dev` Manager built by the
-upstream CI for commit `234f6e040fcbca18b16d2398e1aa225712ec99ad`. The
-matching artifact is
-`KernelSU_Next_v3.3.0-25-g234f6e04-spoofed_33239-release.apk`; it contains the
-x86_64 `ksud` from that same commit and uses UAPI version 2, exactly like the
-kernel. Upstream changes its package ID to a randomized value while preserving
-the official APK signing identity compiled into the module:
+The module targets `uname -r` by default. To build for a different installed
+kernel, set `KERNEL_RELEASE`; the script derives its header path. Set
+`KERNEL_BUILD` only when those headers are not available at
+`/usr/lib/modules/$KERNEL_RELEASE/build`.
 
-```text
-certificate size:   998 (0x3e6)
-certificate SHA256: 79e590113c4c4c0c222978e413a5faa801666957b1212a328e46c00c69821bf7
-```
+## Runtime
 
-The spoofed and ordinary upstream APKs have been verified to share that exact
-certificate. The spoofed APK is included in this repository's GitHub release
-and avoids exposing the well-known `com.rifsxd.ksunext` package name. A Manager
-built in an unrelated fork without the official signing secret has a different
-certificate and will intentionally not be crowned by the kernel.
-
-If the ordinary Manager is already installed, install the spoofed APK first,
-open it and confirm that it reports **Rooted**, then remove the ordinary
-`com.rifsxd.ksunext` app. Keeping both installed leaves the known package name
-visible to application scanners.
-
-## Package and install
+After installing or upgrading the package:
 
 ```sh
-cd packaging
-makepkg -f
-sudo pacman -U ./kernelsu-next-waydroid-*.pkg.tar.zst
-sudo configure-waydroid-kernelsu
-```
-
-Install the matching Manager APK after starting the Waydroid session as shown
-below.
-
-## Start or restart Waydroid
-
-After booting the matching host kernel:
-
-```sh
+sudo waydroid-kernelsu configure
 waydroid session stop
-sudo systemctl stop waydroid-container
-sudo systemctl start waydroid-container
+sudo systemctl restart waydroid-container
 waydroid show-full-ui
 ```
 
-On a fresh installation, wait until Android reports that user 0 is ready, then
-install the matching Manager (skip this command when it is already installed):
+The configurator preserves backups of the seccomp profile and LXC config. It
+removes only the exact `reboot` entry from the denylist and registers the mount
+and pre-start hooks.
 
-```sh
-waydroid app install ./KernelSU_Next_*-spoofed_*-release.apk
+Available commands:
+
+```text
+waydroid-kernelsu build       # build the module and ksud
+waydroid-kernelsu package     # build both and create the Arch package
+waydroid-kernelsu install     # install the newest generated package
+waydroid-kernelsu configure   # configure LXC and seccomp integration
+waydroid-kernelsu status      # display effective state
+waydroid-kernelsu audit       # audit the container mounts
+waydroid-kernelsu reload      # safe module reload, with Waydroid stopped
+waydroid-kernelsu recover     # manual late-load recovery
 ```
 
-The LXC pre-start hook resets KernelSU before every new Waydroid container
-init. If the module is already loaded it uses the guarded
-`load-kernelsu --unload-first` sequence; otherwise it performs a normal load.
-This reset is required because KernelSU's boot stages are one-shot per module
-load. Android init can then execute the genuine blocking `post-fs-data` action
-before `app_process64` starts on every container restart.
+`reload` prepares the dispatcher for unload, removes the module, and loads it
+again. Stop Waydroid first. Do not replace this sequence with `rmmod` or
+`modprobe -r`: the module holds a self-reference until every global x86_64
+entry point has been restored.
 
-On x86_64 this build retains KernelSU Next's
-`KSU_X86_PATCH_SYSCALL_DISPATCHER`. A raw `rmmod kernelsu` is intentionally
-refused by a module self-reference: dynamically patched global syscall entry
-points must be detached in a separate operation before `delete_module` can be
-safe. To replace a loaded module, first stop Waydroid and use the packaged
-loader:
+The mount hook currently reproduces audited AOSP behavior: `proc` uses
+`hidepid=2,gid=3009`, `/data` uses `noatime,nosuid,nodev`, unwanted debugfs is
+removed, and extra `/vendor` binds become read-only. It does not change host
+mounts. The procfs and FUSE options remain present in the Android 17 source.
+The original evidence for each decision is in
+[`docs/WAYDROID_AOSP_MOUNT_AUDIT.md`](docs/WAYDROID_AOSP_MOUNT_AUDIT.md).
 
-```sh
-waydroid session stop
-sudo systemctl stop waydroid-container
-sudo load-kernelsu --unload-first
-```
-
-The loader writes `1` to the root-only `prepare_unload` module parameter. The
-kernel restores the original x86 dispatcher and every patched syscall-table
-entry while the module is still pinned, returns to userspace, releases its
-guard, and only then allows `rmmod`. Module teardown can remove the Android
-daemon, so the loader restores the package-matched `ksud` into Waydroid's
-`data/adb` before reloading the module. Never bypass this sequence with
-`rmmod`, `modprobe -r`, or `load-kernelsu --unload-first` while Waydroid is
-running.
-
-The late-load helper and static unit remain installed for manual recovery of
-an already-running container. Invoke that recovery explicitly with
-`sudo systemctl start kernelsu-waydroid-late-load.service`. There is no
-periodic timer: late-load occurs after Zygote and therefore cannot replace the
-normal pre-Zygote `post-fs-data` contract required by Zygisk modules.
-
-### Verification
-
-After Android reports that user 0 is ready, verify Zygisk Next with its own
-status command:
+After Android starts, verify Zygisk Next with its own status command:
 
 ```sh
-sudo waydroid shell -- \
-  /data/adb/modules/zygisksu/bin/zygiskd status
+sudo waydroid shell -- /data/adb/modules/zygisksu/bin/zygiskd status
 ```
 
-Require `inject_state:1`, successful states for both Zygotes,
-`root_status:✅KernelSU`, and `modules_with_issue:0`. Process-name searches are
-not authoritative because the daemon need not retain a public `zygisk` marker.
+The expected result includes `inject_state:1`, successful states for both
+Zygotes, KernelSU root, and no module with an issue.

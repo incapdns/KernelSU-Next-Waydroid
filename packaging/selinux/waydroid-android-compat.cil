@@ -1,0 +1,48 @@
+; Minimal Android context namespace for KernelSU Next and BreZygisk on a
+; Waydroid host using the Arch reference policy.  This does not import or
+; enforce Android's policy; it only makes the Android security contexts used
+; by the integration resolvable by the host SELinux policy.
+
+(user u)
+(userrole u object_r)
+(userlevel u (s0))
+(userrange u ((s0) (s0 (range c0 c1023))))
+
+(role r)
+(userrole u r)
+
+; Process domains resolved directly by KernelSU.
+(type init)
+(type zygote)
+(type su)
+(type priv_app)
+(type ksu)
+(type system_server)
+
+(roletype r init)
+(roletype r zygote)
+(roletype r su)
+(roletype r priv_app)
+(roletype r ksu)
+(roletype r system_server)
+
+; Object types referenced by KernelSU and BreZygisk scripts/rules.
+(type system_file)
+(type ksu_file)
+(type zygisk_file)
+(type adb_data_file)
+(type proc)
+(type nsfs)
+(type tmpfs)
+(type appdomain_tmpfs)
+(type system_lib_file)
+
+(roletype object_r system_file)
+(roletype object_r ksu_file)
+(roletype object_r zygisk_file)
+(roletype object_r adb_data_file)
+(roletype object_r proc)
+(roletype object_r nsfs)
+(roletype object_r tmpfs)
+(roletype object_r appdomain_tmpfs)
+(roletype object_r system_lib_file)

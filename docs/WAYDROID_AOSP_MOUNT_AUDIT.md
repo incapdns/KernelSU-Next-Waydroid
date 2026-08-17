@@ -134,9 +134,10 @@ functionality.
 `/usr/lib/kernelsu-next-waydroid/aosp-mount-hook` is registered as an
 `lxc.hook.mount`. LXC documents that this hook executes inside the container's
 mount namespace after automatic mounts and before `pivot_root`. It remounts
-only the container namespace. It restores the literal Android 13 procfs flags
-and data options, applies the fstab-compatible `/data` VFS flags, closes the
-writable vendor bind holes and removes the property-disabled debugfs mount.
+only the container namespace. It restores the audited AOSP procfs flags and
+data options, which remain present in the Android 17 source, applies the
+fstab-compatible `/data` VFS flags, closes the writable vendor bind holes and
+removes the property-disabled debugfs mount.
 
 The verifier is closed-world: every runtime `mountinfo` row must map to an
 explicit AOSP request, an AOSP dynamic subsystem (`apexd` or `vold`), or a

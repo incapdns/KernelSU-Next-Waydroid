@@ -16,10 +16,11 @@ flock 9
 if grep -q '^kernelsu ' /proc/modules; then
     log "resetting KernelSU safely before Waydroid init"
     timeout --signal=TERM --kill-after=5s 30s \
-        /usr/bin/load-kernelsu --unload-first
+        /usr/lib/kernelsu-next-waydroid/load-module --unload-first
 else
     log "loading KernelSU before Waydroid init"
-    timeout --signal=TERM --kill-after=5s 30s /usr/bin/load-kernelsu
+    timeout --signal=TERM --kill-after=5s 30s \
+        /usr/lib/kernelsu-next-waydroid/load-module
 fi
 
 grep -q '^kernelsu ' /proc/modules || {
