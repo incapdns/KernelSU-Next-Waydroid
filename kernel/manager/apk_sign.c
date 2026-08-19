@@ -100,6 +100,8 @@ static bool check_block(struct file *fp, loff_t *pos, loff_t block_end, unsigned
 {
 	loff_t signers_end, signer_end, signed_data_end, digests_end, certificates_end;
 	u32 certificate_size;
+	char *cert;
+	bool matched;
 
 	// v2 block: signers sequence -> first signer -> signed data -> digests
 	if (!read_length_prefixed_end(fp, pos, block_end, &signers_end) ||
@@ -116,7 +118,7 @@ static bool check_block(struct file *fp, loff_t *pos, loff_t block_end, unsigned
 	if (certificate_size > INT_MAX || certificate_size > (u64)(certificates_end - *pos))
 		return false;
 
-#define CERT_MAX_LENGTH 1024
+#define CERT_MAX_LENGTH 4096
 	if (certificate_size != expected_size)
 		return false;
 
@@ -125,22 +127,30 @@ static bool check_block(struct file *fp, loff_t *pos, loff_t block_end, unsigned
 		return false;
 	}
 
-	char cert[CERT_MAX_LENGTH];
-	if (!read_exact(fp, cert, certificate_size, pos, certificates_end))
+	cert = kmalloc(certificate_size, GFP_KERNEL);
+	if (!cert)
 		return false;
+
+	if (!read_exact(fp, cert, certificate_size, pos, certificates_end)) {
+		kfree(cert);
+		return false;
+	}
 
 	unsigned char digest[SHA256_DIGEST_SIZE];
 	if (ksu_sha256(cert, certificate_size, digest)) {
 		pr_info("sha256 error\n");
+		kfree(cert);
 		return false;
 	}
+	kfree(cert);
 
 	char hash_str[SHA256_DIGEST_SIZE * 2 + 1];
 	hash_str[SHA256_DIGEST_SIZE * 2] = '\0';
 
 	bin2hex(hash_str, digest, SHA256_DIGEST_SIZE);
 	pr_info("sha256: %s, expected: %s\n", hash_str, expected_sha256);
-	return strcmp(expected_sha256, hash_str) == 0;
+	matched = strcmp(expected_sha256, hash_str) == 0;
+	return matched;
 }
 
 static __always_inline bool check_v2_signature(char *path,
