@@ -16,10 +16,59 @@ proc_mount=$LXC_ROOTFS_MOUNT/proc
 data_mount=$LXC_ROOTFS_MOUNT/data
 waydroid_prop_mount=$LXC_ROOTFS_MOUNT/vendor/waydroid.prop
 host_permissions_mount=$LXC_ROOTFS_MOUNT/vendor/etc/host-permissions
+uts_config=/etc/kernelsu-next-waydroid/uts-identity.conf
 log "rootfs=$LXC_ROOTFS_MOUNT proc=$proc_mount data=$data_mount"
 [[ -d $proc_mount ]] || {
     echo "${0##*/}: proc mountpoint does not exist: $proc_mount" >&2
     exit 1
+}
+
+valid_uts_name() {
+    local value=$1 label
+    [[ -n $value && ${#value} -le 64 ]] || return 1
+    [[ $value != .* && $value != *. && $value != *..* ]] || return 1
+    while IFS= read -r label; do
+        [[ $label =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ || \
+           $label =~ ^[A-Za-z0-9]$ ]] || return 1
+    done < <(tr '.' '\n' <<< "$value")
+}
+
+apply_uts_identity() {
+    local enabled=0 configured_hostname= configured_domainname= key value
+    [[ -r $uts_config ]] || return 0
+    while IFS='=' read -r key value; do
+        case $key in
+            enabled) enabled=$value ;;
+            hostname) configured_hostname=$value ;;
+            domainname) configured_domainname=$value ;;
+        esac
+    done < "$uts_config"
+    [[ $enabled == 1 ]] || return 0
+    valid_uts_name "$configured_hostname" || {
+        echo "${0##*/}: invalid configured UTS hostname: $configured_hostname" >&2
+        exit 1
+    }
+    valid_uts_name "$configured_domainname" || {
+        echo "${0##*/}: invalid configured UTS domainname: $configured_domainname" >&2
+        exit 1
+    }
+
+    # LXC protects /proc/sys with a read-only bind. Temporarily lift only that
+    # container-side VFS flag, write the two UTS fields, and restore it before
+    # Android init can run. The proc superblock and host mount are untouched.
+    mount -o remount,bind,rw "$proc_mount/sys"
+    printf '%s\n' "$configured_hostname" > "$proc_mount/sys/kernel/hostname"
+    printf '%s\n' "$configured_domainname" > "$proc_mount/sys/kernel/domainname"
+    mount -o remount,bind,ro "$proc_mount/sys"
+    [[ $(<"$proc_mount/sys/kernel/hostname") == "$configured_hostname" ]] || {
+        echo "${0##*/}: failed to verify the UTS hostname" >&2
+        exit 1
+    }
+    [[ $(<"$proc_mount/sys/kernel/domainname") == "$configured_domainname" ]] || {
+        echo "${0##*/}: failed to verify the UTS domainname" >&2
+        exit 1
+    }
+    log "UTS identity applied: hostname=$configured_hostname domainname=$configured_domainname namespace=$(readlink /proc/self/ns/uts 2>/dev/null || true)"
 }
 
 # first_stage_init.cpp passes mount flags 0 for proc. LXC initially adds
@@ -27,6 +76,10 @@ log "rootfs=$LXC_ROOTFS_MOUNT proc=$proc_mount data=$data_mount"
 # literal Android data options. This audit targets equivalence, not a merely
 # stricter-looking approximation.
 mount -t proc -o remount,rw,suid,dev,exec,hidepid=2,gid=3009 proc "$proc_mount"
+
+# hostname and domainname are properties of the container's UTS namespace.
+# Applying them here changes only Waydroid and happens before Android init.
+apply_uts_identity
 
 # Do not change the LXC-created /dev root from 01777 to AOSP's literal 0755.
 # Waydroid's hwcomposer runs outside Android's root context and creates the

@@ -3,6 +3,9 @@ kernelsu-objs := core/init.o
 kernelsu-objs += feature/kernel_umount.o
 kernelsu-objs += feature/sulog.o
 kernelsu-objs += feature/sucompat.o
+ifeq ($(CONFIG_KSU_SUSFS),y)
+kernelsu-objs += feature/susfs_bridge.o
+endif
 
 kernelsu-objs += hook/lsm_hook.o
 kernelsu-objs += hook/setuid_hook.o
@@ -36,6 +39,12 @@ kernelsu-objs += policy/feature.o
 
 kernelsu-objs += runtime/boot_event.o
 kernelsu-objs += runtime/ksud_integration.o
+ifeq ($(CONFIG_KSU_NON_ANDROID),y)
+kernelsu-objs += runtime/waydroid_uts.o
+kernelsu-objs += feature/proc_modules_hide.o
+kernelsu-objs += feature/overlayfs_statfs_hide.o
+kernelsu-objs += feature/proc_version_hide.o
+endif
 
 ifeq ($(CONFIG_KSU_SELINUX),y)
 kernelsu-objs += selinux/selinux.o
@@ -74,6 +83,9 @@ ccflags-y += -DCONFIG_KSU_NON_ANDROID=1
 endif
 ifeq ($(CONFIG_KSU_SELINUX),y)
 ccflags-y += -DCONFIG_KSU_SELINUX=1
+endif
+ifeq ($(CONFIG_KSU_SUSFS),y)
+ccflags-y += -DCONFIG_KSU_SUSFS=1
 endif
 endif
 
@@ -144,11 +156,15 @@ endif
 $(info -- KernelSU-Next new DCACHE flush: $(KSU_NEW_DCACHE_FLUSH))
 
 ifndef KSU_NEXT_MANAGER_SIZE
-KSU_NEXT_MANAGER_SIZE := 0x3e6
+KSU_NEXT_MANAGER_SIZE := 0x52b
 endif
 
 ifndef KSU_NEXT_MANAGER_HASH
-KSU_NEXT_MANAGER_HASH := 79e590113c4c4c0c222978e413a5faa801666957b1212a328e46c00c69821bf7
+KSU_NEXT_MANAGER_HASH := 634721c5c77b1466bc955cbf52d0961cab1fb2d689719a5960c5a86cb8aecf25
+endif
+
+ifndef KSU_MANAGER_PACKAGE
+KSU_MANAGER_PACKAGE := ydwkyx.lclajk.qzfwaw
 endif
 
 ifdef KSU_MANAGER_PACKAGE

@@ -1,9 +1,20 @@
 #!/bin/bash
 
-# Generate 3 random lowercase words (6 letters each)
-word1=$(tr -dc 'a-z' </dev/urandom | head -c6)
-word2=$(tr -dc 'a-z' </dev/urandom | head -c6)
-word3=$(tr -dc 'a-z' </dev/urandom | head -c6)
+set -euo pipefail
+
+# A stable package name is required for signed upgrades. CI/release builds set
+# KSU_SPOOF_PACKAGE_ID; ad-hoc local builds keep the original random behavior.
+if [[ -n ${KSU_SPOOF_PACKAGE_ID:-} ]]; then
+    if [[ ! $KSU_SPOOF_PACKAGE_ID =~ ^[a-z]{6}\.[a-z]{6}\.[a-z]{6}$ ]]; then
+        echo "KSU_SPOOF_PACKAGE_ID must contain three six-letter lowercase components" >&2
+        exit 1
+    fi
+    IFS=. read -r word1 word2 word3 <<< "$KSU_SPOOF_PACKAGE_ID"
+else
+    word1=$(tr -dc 'a-z' </dev/urandom | head -c6)
+    word2=$(tr -dc 'a-z' </dev/urandom | head -c6)
+    word3=$(tr -dc 'a-z' </dev/urandom | head -c6)
+fi
 
 echo "Generated words:"
 echo "com     -> $word1"

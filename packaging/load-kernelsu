@@ -6,11 +6,21 @@ if (( EUID != 0 )); then
     exit 1
 fi
 
-kernel_release=$(uname -r)
-module_path=$(modinfo -n kernelsu 2>/dev/null || true)
+osrelease_file=${KSU_KERNEL_OSRELEASE_FILE:-/proc/sys/kernel/osrelease}
+module_root=${KSU_MODULE_ROOT:-/usr/lib/modules}
+
+# Read the loader key in the host UTS namespace. The isolated Waydroid release
+# configured below can never affect this value.
+kernel_release=$(<"$osrelease_file")
+if [[ -z $kernel_release || $kernel_release == */* ]]; then
+    echo "${0##*/}: invalid kernel release from ${osrelease_file}." >&2
+    exit 1
+fi
+
+module_path=$(modinfo -k "$kernel_release" -n kernelsu 2>/dev/null || true)
 if [[ -z $module_path ]]; then
-    module_path=$(find "/usr/lib/modules/${kernel_release}"/{extras,updates} \
-        -iname 'kernelsu.ko*' -print -quit 2>/dev/null || true)
+	module_path=$(find "${module_root}/${kernel_release}"/{extras,updates} \
+		-iname 'kernelsu.ko*' -print -quit 2>/dev/null || true)
 fi
 if [[ -z $module_path ]]; then
     echo "${0##*/}: kernelsu.ko does not exist for ${kernel_release}." >&2
@@ -18,23 +28,17 @@ if [[ -z $module_path ]]; then
 fi
 
 if ! grep -wq ext4 /proc/modules; then
-    modprobe ext4
+	modprobe -S "$kernel_release" ext4
 fi
 
-if [[ ${1:-} == --unload-first || ${1:-} == -d ]]; then
-    if grep -q '^kernelsu ' /proc/modules; then
-        prepare_unload=/sys/module/kernelsu/parameters/prepare_unload
-        if [[ ! -w $prepare_unload ]]; then
-            echo "${0##*/}: loaded module has no safe prepare_unload control; reboot required." >&2
-            exit 2
-        fi
-        printf '1\n' > "$prepare_unload"
-        if [[ $(<"$prepare_unload") != Y ]]; then
-            echo "${0##*/}: KernelSU refused safe unload preparation." >&2
-            exit 3
-        fi
-        rmmod kernelsu
-    fi
+if (($#)); then
+    echo "${0##*/}: this command only loads KernelSU; stop Waydroid to unload it." >&2
+    exit 2
+fi
+
+if grep -q '^kernelsu ' /proc/modules; then
+    echo "${0##*/}: kernelsu is already loaded." >&2
+    exit 3
 fi
 
 case "$module_path" in
@@ -44,21 +48,4 @@ case "$module_path" in
     *) cat "$module_path" | modloader - ;;
 esac
 
-# Module teardown removes the Android daemon. Restore the package-matched
-# binary while Waydroid is stopped so Android init can execute post-fs-data
-# before the first Zygote on the next container boot.
-if [[ ${1:-} == --unload-first || ${1:-} == -d ]]; then
-    packaged_ksud=/usr/lib/kernelsu-next-waydroid/ksud-x86_64
-    if [[ -x $packaged_ksud ]]; then
-        restored=0
-        for adb_dir in /home/*/.local/share/waydroid/data/adb /var/lib/waydroid/data/adb; do
-            [[ -d $adb_dir ]] || continue
-            install -o root -g root -m 0755 "$packaged_ksud" "$adb_dir/ksud"
-            echo "${0##*/}: restored package-matched ksud at $adb_dir/ksud"
-            restored=1
-        done
-        if (( ! restored )); then
-            echo "${0##*/}: warning: no Waydroid data/adb directory found; ksud was not restored." >&2
-        fi
-    fi
-fi
+/usr/lib/kernelsu-next-waydroid/configure-osrelease apply

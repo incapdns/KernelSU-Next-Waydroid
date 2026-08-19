@@ -16,15 +16,15 @@ usage() {
 Usage: $program <command>
 
 Source checkout:
-  build       build kernelsu.ko and Android x86_64 ksud
-  package     build both artifacts and create the Arch package
+  build       build kernelsu.ko
+  package     build the module and create the Arch package
   install     install the newest generated Arch package (run as root)
 
 Installed system:
   configure   configure Waydroid seccomp and LXC hooks (run as root)
-  reload      reload the module using the safe sequence (run as root)
+  reload      stop Waydroid, then load the freshly unloaded module (run as root)
   audit       verify the container's effective mounts (run as root)
-  recover     run manual late-load in a running container (run as root)
+  uts         manage the Waydroid UTS hostname and domainname
   status      show the module, Waydroid, hooks and installed ksud
 EOF
 }
@@ -57,42 +57,9 @@ build_module() {
     "$repo_root/kernel/build-waydroid-cachyos.sh"
 }
 
-build_ksud() {
-    local ndk_root=${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}
-    local candidate prebuilt api=${KSU_ANDROID_API:-26}
-
-    command -v cargo >/dev/null || die "Cargo is not installed."
-    if [[ -z $ndk_root ]]; then
-        for candidate in /opt/android-ndk /opt/android-sdk/ndk/*; do
-            if [[ -x $candidate/toolchains/llvm/prebuilt/linux-x86_64/bin/clang ]]; then
-                ndk_root=$candidate
-            fi
-        done
-    fi
-    [[ -n $ndk_root ]] || die \
-        "Android NDK was not found; install android-ndk or set ANDROID_NDK_HOME."
-
-    prebuilt=$ndk_root/toolchains/llvm/prebuilt/linux-x86_64
-    [[ -x $prebuilt/bin/x86_64-linux-android${api}-clang ]] || die \
-        "Android NDK does not provide the x86_64 API ${api} compiler."
-
-    export ANDROID_NDK_HOME=$ndk_root
-    export ANDROID_NDK_ROOT=$ndk_root
-    export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$prebuilt/bin/x86_64-linux-android${api}-clang
-    export CC_x86_64_linux_android=$CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER
-    export CXX_x86_64_linux_android=$prebuilt/bin/x86_64-linux-android${api}-clang++
-    export BINDGEN_EXTRA_CLANG_ARGS_x86_64_linux_android="--sysroot=$prebuilt/sysroot -I$prebuilt/sysroot/usr/include/x86_64-linux-android -I$prebuilt/sysroot/usr/include"
-
-    cargo build \
-        --target x86_64-linux-android \
-        --release \
-        --manifest-path "$repo_root/userspace/ksud/Cargo.toml"
-}
-
 build_all() {
     require_source
     build_module
-    build_ksud
 }
 
 newest_package() {
@@ -114,16 +81,29 @@ newest_package() {
 
 show_status() {
     local config=/var/lib/waydroid/lxc/waydroid/config
-    local module_path
+    local module_path kernel_release
+    local state_file=/run/kernelsu-next-waydroid/lifecycle.state
 
     if grep -q '^kernelsu ' /proc/modules; then
         echo "KernelSU: loaded"
     else
         echo "KernelSU: not loaded"
     fi
-    module_path=$(modinfo -n kernelsu 2>/dev/null || true)
-    echo "Module for $(uname -r): ${module_path:-not installed}"
-    echo "Packaged ksud: $([[ -x $libexec_dir/ksud-x86_64 ]] && echo installed || echo missing)"
+    if [[ -r $state_file ]]; then
+        echo "Lifecycle: $(<"$state_file")"
+    else
+        echo "Lifecycle: unknown"
+    fi
+    if [[ -r /sys/module/kernelsu/parameters/proc_modules_hook_state ]]; then
+        echo "Proc modules hook: $(</sys/module/kernelsu/parameters/proc_modules_hook_state)"
+    else
+        echo "Proc modules hook: unavailable"
+    fi
+    echo "SUS_PATH OverlayFS readdir: built into the SUSFS kernel"
+    kernel_release=$(</proc/sys/kernel/osrelease)
+    module_path=$(modinfo -k "$kernel_release" -n kernelsu 2>/dev/null || true)
+    echo "Module for ${kernel_release}: ${module_path:-not installed}"
+    echo "ksud source: embedded in the Manager APK"
     if command -v waydroid >/dev/null; then
         waydroid status 2>/dev/null || echo "Waydroid: unavailable"
     else
@@ -131,6 +111,7 @@ show_status() {
     fi
     if [[ -f $config ]] && \
        grep -Fq "$libexec_dir/pre-start-hook" "$config" && \
+       grep -Fq "$libexec_dir/post-stop-hook" "$config" && \
        grep -Fq "$libexec_dir/aosp-mount-hook" "$config"; then
         echo "LXC hooks: configured"
     else
@@ -164,15 +145,19 @@ case $command_name in
         ;;
     reload)
         require_root
-        private_command load-module load-kernelsu --unload-first "$@"
+        (($# == 0)) || die "reload does not accept arguments."
+        waydroid container stop
+        if grep -q '^kernelsu ' /proc/modules; then
+            die "KernelSU remained loaded after Waydroid stopped; inspect the post-stop hook."
+        fi
+        private_command load-module load-kernelsu
         ;;
     audit)
         require_root
         private_command audit kernelsu-waydroid-aosp-mount-audit "$@"
         ;;
-    recover)
-        require_root
-        private_command late-load kernelsu-waydroid-late-load "$@"
+    uts)
+        private_command uts kernelsu-waydroid-uts "$@"
         ;;
     status)
         (($# == 0)) || die "status does not accept arguments."

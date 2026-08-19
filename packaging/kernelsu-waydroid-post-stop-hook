@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -u
+
+log() {
+    logger -t kernelsu-waydroid-post-stop -- "$*" 2>/dev/null || true
+}
+
+state_dir=/run/kernelsu-next-waydroid
+state_file=$state_dir/lifecycle.state
+
+# lxc-start is still tearing down while this hook runs. Never unload module
+# text here: the parent may still have a syscall return address in it.
+mkdir -p -m 0755 "$state_dir"
+printf 'stop-pending\n' > "$state_file"
+log "stop pending; queued teardown after LXC fully exits"
+
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl --no-block start kernelsu-waydroid-unload.service \
+        >/dev/null 2>&1 || log "unload service queue failed; timer will retry"
+else
+    log "systemctl unavailable; unload timer will reconcile later"
+fi
+
+exit 0

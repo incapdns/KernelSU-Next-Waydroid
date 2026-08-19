@@ -5,6 +5,7 @@
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
 #include <linux/workqueue.h>
+#include <linux/delay.h>
 
 #include "policy/allowlist.h"
 #include "policy/app_profile.h"
@@ -24,6 +25,12 @@
 #include "feature/adb_root.h"
 #include "feature/selinux_hide.h"
 #include "feature/sulog.h"
+#include "feature/susfs_bridge.h"
+#ifdef CONFIG_KSU_NON_ANDROID
+#include "feature/proc_modules_hide.h"
+#include "feature/overlayfs_statfs_hide.h"
+#include "feature/proc_version_hide.h"
+#endif
 #include "infra/symbol_resolver.h"
 
 #if defined(__x86_64__) && !defined(CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER)
@@ -103,9 +110,38 @@ static int ksu_param_set_prepare_unload(const char *val,
     if (READ_ONCE(prepare_unload))
         return 0;
 
+#ifdef CONFIG_KSU_NON_ANDROID
+    /* Detach and drain every global callback while the permanent
+     * self-reference is still held. */
+    ret = ksu_proc_version_hide_prepare_unload();
+    if (ret)
+        return ret;
+
+    ret = ksu_overlayfs_statfs_hide_prepare_unload();
+    if (ret)
+        return ret;
+
+    ret = ksu_proc_modules_hide_prepare_unload();
+    if (ret)
+        return ret;
+#endif
+
     ret = ksu_syscall_hook_prepare_unload();
     if (ret)
         return ret;
+
+	/* Raw syscall-table function pointers do not pin their owner.  The x86
+	 * wrappers do so explicitly; after detaching every entry point, wait for
+	 * short in-flight calls and refuse to drop our final guard if any sleeping
+	 * wrapper still has a return address in module text. */
+    synchronize_rcu_tasks();
+    for (ret = 0; ret < 200 && module_refcount(THIS_MODULE) > 1; ret++)
+        msleep(10);
+    if (module_refcount(THIS_MODULE) > 1) {
+        pr_emerg("prepare unload: %u module references still active\n",
+                 module_refcount(THIS_MODULE) - 1);
+        return -EBUSY;
+    }
 
     WRITE_ONCE(prepare_unload, true);
 
@@ -134,7 +170,7 @@ static const struct kernel_param_ops ksu_prepare_unload_ops = {
 
 module_param_cb(prepare_unload, &ksu_prepare_unload_ops, NULL, 0600);
 MODULE_PARM_DESC(prepare_unload,
-                 "Detach x86 syscall patches before unloading the module");
+                 "Detach and drain global kernel callbacks before unloading");
 #endif
 
 int __init kernelsu_init(void)
@@ -178,6 +214,11 @@ int __init kernelsu_init(void)
 	if (!ksu_cred) {
 		pr_err("prepare cred failed!\n");
 		return -ENOSYS;
+	}
+
+	if (ksu_susfs_bridge_init()) {
+		put_cred(ksu_cred);
+		return -ENODEV;
 	}
 
 	ksu_init_symbol_resolver();
@@ -264,6 +305,7 @@ int __init kernelsu_init(void)
 void __exit kernelsu_exit(void)
 {
 	pr_emerg("exit: KernelSU teardown begin\n");
+	ksu_susfs_bridge_exit();
 	// Phase 1: Stop all hooks first to prevent new callbacks
 	ksu_syscall_hook_manager_exit();
 

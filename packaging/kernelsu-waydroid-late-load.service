@@ -1,8 +1,0 @@
-[Unit]
-Description=KernelSU Next late-load inside Waydroid
-After=waydroid-container.service
-StartLimitIntervalSec=0
-
-[Service]
-Type=oneshot
-ExecStart=/usr/lib/kernelsu-next-waydroid/late-load

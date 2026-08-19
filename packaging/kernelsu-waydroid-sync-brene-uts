@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+program=${0##*/}
+lxc_config=${KSU_WAYDROID_LXC_SESSION_CONFIG:-/var/lib/waydroid/lxc/waydroid/config_session}
+uts_config=${KSU_WAYDROID_UTS_CONFIG:-/etc/kernelsu-next-waydroid/uts-identity.conf}
+
+die() {
+    echo "$program: $*" >&2
+    exit 1
+}
+
+valid_release() {
+    local value=$1
+    [[ -n $value && ${#value} -le 64 && \
+       $value =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*([A-Za-z0-9]|\+)$ ]]
+}
+
+valid_version() {
+    local value=$1
+    [[ -n $value && ${#value} -le 64 && $value != *$'\n'* && $value != *$'\r'* ]]
+}
+
+(( EUID == 0 )) || die 'run as root.'
+[[ -r $lxc_config ]] || exit 0
+
+data_source=$(awk '$1 == "lxc.mount.entry" && $2 == "=" && $4 == "data" { print $3; exit }' "$lxc_config")
+[[ -n $data_source && $data_source == /* ]] || exit 0
+request_file=${data_source%/}/adb/brene/waydroid-uts.conf
+[[ -f $request_file && ! -L $request_file ]] || exit 0
+
+request_uid=$(stat -c %u -- "$request_file")
+request_mode=$(stat -c %a -- "$request_file")
+[[ $request_uid == 0 && $request_mode == 600 ]] || \
+    die "refusing unsafe request ownership/mode: $request_file ($request_uid:$request_mode)"
+
+schema=
+enabled=
+requested_release=
+requested_version=
+while IFS='=' read -r key value; do
+    case $key in
+        schema) schema=$value ;;
+        enabled) enabled=$value ;;
+        osrelease) requested_release=$value ;;
+        version) requested_version=$value ;;
+        '') ;;
+        *) die "unknown key in BRENE UTS request: $key" ;;
+    esac
+done < "$request_file"
+
+[[ $schema == 1 && $enabled == 1 ]] || die 'invalid BRENE UTS request header.'
+valid_release "$requested_release" || die 'invalid BRENE osrelease request.'
+valid_version "$requested_version" || die 'invalid BRENE version request.'
+
+KSU_WAYDROID_UTS_CONFIG=$uts_config \
+    /usr/lib/kernelsu-next-waydroid/uts kernel enable \
+        "$requested_release" "$requested_version" >/dev/null

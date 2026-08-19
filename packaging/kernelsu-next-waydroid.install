@@ -5,10 +5,11 @@ post_install() {
         depmod -a "$(basename "$(dirname "$(dirname "$module_dir")")")"
     done
     systemctl daemon-reload
-    # Remove the obsolete periodic retry from installations predating pkgrel 37.
-    # Manual late-load recovery remains available through the static service.
-    systemctl stop kernelsu-waydroid-late-load.timer \
-        kernelsu-waydroid-late-load.service 2>/dev/null || true
+    systemctl enable --now kernelsu-waydroid-unload.timer
+    # Remove the retired late-load transport from older package revisions.
+    # The Manager APK is now the sole source of the ABI-matched ksud binary.
+    systemctl disable --now kernelsu-waydroid-late-load.timer 2>/dev/null || true
+    systemctl stop kernelsu-waydroid-late-load.service 2>/dev/null || true
     systemctl disable kernelsu-waydroid-late-load.timer 2>/dev/null || true
     if [[ -x /usr/bin/waydroid-kernelsu && \
           -f /var/lib/waydroid/lxc/waydroid/config ]]; then
@@ -21,8 +22,8 @@ post_upgrade() {
 }
 
 pre_remove() {
-    systemctl disable --now kernelsu-waydroid-late-load.timer 2>/dev/null || true
-    systemctl stop kernelsu-waydroid-late-load.service 2>/dev/null || true
+    systemctl disable --now kernelsu-waydroid-unload.timer 2>/dev/null || true
+    systemctl stop kernelsu-waydroid-unload.service 2>/dev/null || true
 }
 
 post_remove() {

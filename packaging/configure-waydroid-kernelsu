@@ -12,6 +12,10 @@ container_config=/var/lib/waydroid/lxc/waydroid/config
 container_config_backup=${container_config}.pre-kernelsu
 aosp_mount_hook=/usr/lib/kernelsu-next-waydroid/aosp-mount-hook
 pre_start_hook=/usr/lib/kernelsu-next-waydroid/pre-start-hook
+post_stop_hook=/usr/lib/kernelsu-next-waydroid/post-stop-hook
+unload_worker=/usr/lib/kernelsu-next-waydroid/unload
+unload_service=/usr/lib/systemd/system/kernelsu-waydroid-unload.service
+unload_timer=/usr/lib/systemd/system/kernelsu-waydroid-unload.timer
 
 if [[ ! -f $profile ]]; then
     echo "${0##*/}: Waydroid seccomp profile not found: $profile" >&2
@@ -23,13 +27,10 @@ if [[ ! -e $backup ]]; then
 fi
 
 if grep -qx 'reboot' "$profile"; then
-    temporary=$(mktemp "${profile}.XXXXXX")
-    trap 'rm -f -- "${temporary:-}"' EXIT
-    awk '$0 != "reboot"' "$profile" > "$temporary"
-    install -o root -g root -m 0644 "$temporary" "$profile"
-    echo "${0##*/}: removed reboot from the Waydroid seccomp deny list."
+    echo "${0##*/}: reboot is already blocked for ordinary Android processes."
 else
-    echo "${0##*/}: Waydroid seccomp profile is already configured."
+    printf '%s\n' reboot >> "$profile"
+    echo "${0##*/}: restored reboot to the Waydroid seccomp deny list."
 fi
 
 if [[ ! -f $container_config ]]; then
@@ -42,6 +43,14 @@ if [[ ! -x $aosp_mount_hook ]]; then
 fi
 if [[ ! -x $pre_start_hook ]]; then
     echo "${0##*/}: KernelSU pre-start hook not installed: $pre_start_hook" >&2
+    exit 1
+fi
+if [[ ! -x $post_stop_hook ]]; then
+    echo "${0##*/}: KernelSU post-stop hook not installed: $post_stop_hook" >&2
+    exit 1
+fi
+if [[ ! -x $unload_worker || ! -f $unload_service || ! -f $unload_timer ]]; then
+    echo "${0##*/}: asynchronous unload reconciler is incomplete." >&2
     exit 1
 fi
 if [[ ! -e $container_config_backup ]]; then
@@ -64,9 +73,19 @@ pre_start_line="lxc.hook.pre-start = $pre_start_hook"
 if grep -Fqx "$pre_start_line" "$container_config"; then
     echo "${0##*/}: KernelSU pre-start hook is already configured."
 else
-    printf '\n# Reset KernelSU one-shot Android boot hooks before every container init.\n%s\n' \
+    printf '\n# Load KernelSU before every Waydroid container init.\n%s\n' \
         "$pre_start_line" >> "$container_config"
-    echo "${0##*/}: configured KernelSU pre-start reset."
+    echo "${0##*/}: configured KernelSU pre-start loading."
+fi
+
+post_stop_line="lxc.hook.post-stop = $post_stop_hook"
+sed -i '\|^lxc\.hook\.post-stop = /dev/null$|d' "$container_config"
+if grep -Fqx "$post_stop_line" "$container_config"; then
+    echo "${0##*/}: KernelSU post-stop hook is already configured."
+else
+    printf '\n# Queue KernelSU teardown after the Waydroid container has fully exited.\n%s\n' \
+        "$post_stop_line" >> "$container_config"
+    echo "${0##*/}: configured KernelSU post-stop teardown."
 fi
 
 # Keep the start-host /dev/pts finalizer available only as an experimental

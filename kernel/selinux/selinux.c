@@ -21,6 +21,7 @@
 static u32 cached_su_sid __read_mostly = 0;
 static u32 cached_zygote_sid __read_mostly = 0;
 static u32 cached_init_sid __read_mostly = 0;
+static u32 cached_priv_app_sid __read_mostly = 0;
 u32 ksu_file_sid __read_mostly = 0;
 
 static int transive_to_domain(const char *domain, struct cred *cred, bool clear_exec_sid)
@@ -154,7 +155,20 @@ void cache_sid(void)
     } else {
         pr_info("Cached ksu_file SID: %u\n", ksu_file_sid);
     }
+
+    err = security_secctx_to_secid(PRIV_APP_CONTEXT, strlen(PRIV_APP_CONTEXT),
+                                   &cached_priv_app_sid);
+    if (err) {
+        pr_warn("Failed to cache priv_app SID: %d\n", err);
+        cached_priv_app_sid = 0;
+    } else {
+        pr_info("Cached priv_app SID: %u\n", cached_priv_app_sid);
+    }
 }
+
+u32 ksu_get_cached_su_sid(void) { return READ_ONCE(cached_su_sid); }
+u32 ksu_get_cached_zygote_sid(void) { return READ_ONCE(cached_zygote_sid); }
+u32 ksu_get_cached_priv_app_sid(void) { return READ_ONCE(cached_priv_app_sid); }
 
 /*
  * Fast path: compare task's SID directly against cached value.

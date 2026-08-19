@@ -20,6 +20,11 @@
 #include "hook/syscall_event_bridge.h"
 #include "feature/adb_root.h"
 #include "supercall/supercall.h"
+#include "feature/susfs_bridge.h"
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+#include "uapi/supercall.h"
+#endif
 
 static int ksu_handle_init_mark_tracker(const char __user **filename_user)
 {
@@ -159,4 +164,19 @@ long __nocfi ksu_hook_setresuid(int orig_nr, const struct pt_regs *regs)
 
     ksu_handle_setresuid(old_uid, current_uid().val);
     return ret;
+}
+
+long __nocfi ksu_hook_reboot(int orig_nr, const struct pt_regs *regs)
+{
+#ifdef CONFIG_KSU_SUSFS
+	int magic1 = (int)PT_REGS_PARM1(regs);
+	int magic2 = (int)PT_REGS_PARM2(regs);
+	unsigned int cmd = (unsigned int)PT_REGS_PARM3(regs);
+	unsigned long arg = (unsigned long)PT_REGS_SYSCALL_PARM4(regs);
+
+	if (magic1 == KSU_INSTALL_MAGIC1 && magic2 == SUSFS_MAGIC &&
+	    current_uid().val == 0)
+		return ksu_susfs_bridge_dispatch(cmd, arg);
+#endif
+	return ksu_syscall_table[orig_nr](regs);
 }

@@ -1,0 +1,7 @@
+[Unit]
+Description=Safely reconcile KernelSU unload after Waydroid teardown
+After=waydroid-container.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/kernelsu-next-waydroid/unload

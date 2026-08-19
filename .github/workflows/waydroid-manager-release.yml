@@ -1,0 +1,98 @@
+name: Build Waydroid Manager Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ksud:
+    strategy:
+      matrix:
+        target:
+          - aarch64-linux-android
+          - x86_64-linux-android
+    uses: ./.github/workflows/ksud.yml
+    with:
+      target: ${{ matrix.target }}
+      os: ubuntu-latest
+      pack_lkm: false
+      pack_ksuinit: false
+
+  build-manager:
+    needs: build-ksud
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: manager
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Require release configuration
+        env:
+          KEYSTORE: ${{ secrets.KEYSTORE }}
+          KSU_SPOOF_PACKAGE_ID: ${{ vars.KSU_SPOOF_PACKAGE_ID }}
+        run: |
+          test -n "$KEYSTORE"
+          test -n "$KSU_SPOOF_PACKAGE_ID"
+
+      - name: Apply stable spoofed identity
+        env:
+          KSU_SPOOF_PACKAGE_ID: ${{ vars.KSU_SPOOF_PACKAGE_ID }}
+        run: ./spoof
+
+      - name: Configure release signing
+        env:
+          KEYSTORE: ${{ secrets.KEYSTORE }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          printf '%s' "$KEYSTORE" | base64 -d > key.jks
+          chmod 0600 key.jks
+          {
+            printf 'KEYSTORE_FILE=key.jks\n'
+            printf 'KEYSTORE_PASSWORD=%s\n' "$KEYSTORE_PASSWORD"
+            printf 'KEY_ALIAS=%s\n' "$KEY_ALIAS"
+            printf 'KEY_PASSWORD=%s\n' "$KEY_PASSWORD"
+          } >> gradle.properties
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v5
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Download arm64 ksud
+        uses: actions/download-artifact@v7
+        with:
+          name: ksud-aarch64-linux-android
+          path: artifacts/aarch64-linux-android
+
+      - name: Download x86_64 ksud
+        uses: actions/download-artifact@v7
+        with:
+          name: ksud-x86_64-linux-android
+          path: artifacts/x86_64-linux-android
+
+      - name: Embed ABI-matched ksud binaries
+        run: |
+          install -Dm0755 ../artifacts/aarch64-linux-android/aarch64-linux-android/release/ksud app/src/main/jniLibs/arm64-v8a/libksud.so
+          install -Dm0755 ../artifacts/x86_64-linux-android/x86_64-linux-android/release/ksud app/src/main/jniLibs/x86_64/libksud.so
+
+      - name: Build signed release APK
+        run: ./gradlew clean assembleRelease
+
+      - name: Upload signed APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: KernelSU-Next-Waydroid-Manager
+          path: manager/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error

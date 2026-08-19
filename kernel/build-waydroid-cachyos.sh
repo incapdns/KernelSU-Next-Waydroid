@@ -1,9 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-kernel_release=${KERNEL_RELEASE:-$(uname -r)}
+osrelease_file=${KSU_KERNEL_OSRELEASE_FILE:-/proc/sys/kernel/osrelease}
+kernel_release=${KERNEL_RELEASE:-$(<"$osrelease_file")}
+if [[ -z $kernel_release || $kernel_release == */* ]]; then
+    echo "Invalid kernel release from ${osrelease_file}." >&2
+    exit 1
+fi
 kernel_build=${KERNEL_BUILD:-/usr/lib/modules/${kernel_release}/build}
 repo_root=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
+if [[ -z ${KERNEL_BUILD:-} && \
+      ! -f ${kernel_build}/source/security/selinux/include/objsec.h ]]; then
+    workspace_root=$(realpath "$repo_root/../..")
+    for candidate in "$workspace_root"/components/cachyos-kernel-*-source/*/out-susfs; do
+        if [[ -r $candidate/include/config/kernel.release && \
+              $(<"$candidate/include/config/kernel.release") == "$kernel_release" && \
+              -f $candidate/source/security/selinux/include/objsec.h ]]; then
+            kernel_build=$candidate
+        fi
+    done
+fi
 output_dir=${OUTPUT_DIR:-${repo_root}/kernel/out-waydroid}
 ksu_git_version=$(git -C "$repo_root" rev-list --count HEAD)
 ksu_git_tag=$(git -C "$repo_root" describe --tags --abbrev=0 2>/dev/null || \
@@ -20,6 +36,11 @@ if [[ ! -f ${kernel_build}/Makefile ]]; then
     echo "Kernel build directory not found: ${kernel_build}" >&2
     exit 1
 fi
+if [[ ! -f ${kernel_build}/source/include/linux/susfs_ksu.h &&
+      ! -f ${kernel_build}/include/linux/susfs_ksu.h ]]; then
+    echo "Kernel build does not expose the CachyOS SUSFS bridge: ${kernel_build}" >&2
+    exit 1
+fi
 
 # External-module paths containing spaces are split by Kbuild, so compile a
 # temporary source copy and return only the resulting module.
@@ -32,8 +53,9 @@ make -C "$kernel_build" \
     src="$source_dir" \
     modules \
     CONFIG_KSU=m \
+    CONFIG_KSU_SUSFS=y \
     CONFIG_KSU_NON_ANDROID=y \
-    CONFIG_KSU_SELINUX=n \
+    CONFIG_KSU_SELINUX=y \
     CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER=y \
     KSU_GIT_VERSION="$ksu_git_version" \
     KSU_GIT_TAG="$ksu_git_tag" \

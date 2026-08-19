@@ -5,6 +5,7 @@
 #include <linux/kallsyms.h>
 #include <linux/mutex.h>
 #include <linux/nospec.h>
+#include <linux/module.h>
 #include <asm/cacheflush.h>
 #include "infra/symbol_resolver.h"
 #include "../patch_memory.h"
@@ -159,26 +160,35 @@ static int ksu_find_ni_syscall_slots(int *out_slots, int max_slots)
 // otherwise it's a spurious call — return -ENOSYS.
 static long __nocfi ksu_syscall_dispatcher(const struct pt_regs *regs)
 {
-    if (regs->orig_ax != ksu_dispatcher_nr)
-        return -ENOSYS;
+	long ret = -ENOSYS;
+
+#ifdef MODULE
+	if (unlikely(!try_module_get(THIS_MODULE)))
+		return -ENOSYS;
+#endif
+	if (regs->orig_ax != ksu_dispatcher_nr)
+		goto out;
 
     // On x86_64, orig_ax was overwritten by our tracepoint to route here.
     // The original syscall number passed by userspace is still sitting untouched in ax.
     int orig_nr = (int)regs->ax;
 
-    if (regs->orig_ax == orig_nr)
-        return -ENOSYS;
+	if (regs->orig_ax == orig_nr)
+		goto out;
 
     // Restore registers to original state before dispatching
     ((struct pt_regs *)regs)->orig_ax = orig_nr;
 
     if (likely(orig_nr >= 0 && orig_nr < __NR_syscalls)) {
-        ksu_syscall_hook_fn fn = READ_ONCE(syscall_hooks[orig_nr]);
-        if (likely(fn))
-            return fn(orig_nr, regs);
-    }
-
-    return -ENOSYS;
+		ksu_syscall_hook_fn fn = READ_ONCE(syscall_hooks[orig_nr]);
+		if (likely(fn))
+			ret = fn(orig_nr, regs);
+	}
+out:
+#ifdef MODULE
+	module_put(THIS_MODULE);
+#endif
+	return ret;
 }
 
 // Register a handler into the dispatcher's routing table.

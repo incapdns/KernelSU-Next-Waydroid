@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+program=${0##*/}
+config_file=${KSU_WAYDROID_UTS_CONFIG:-/etc/kernelsu-next-waydroid/uts-identity.conf}
+
+usage() {
+    cat <<EOF
+Usage:
+  waydroid-kernelsu uts show
+  sudo waydroid-kernelsu uts enable HOSTNAME DOMAINNAME
+  sudo waydroid-kernelsu uts disable
+  waydroid-kernelsu uts kernel show
+  sudo waydroid-kernelsu uts kernel enable RELEASE VERSION
+  sudo waydroid-kernelsu uts kernel disable
+
+Examples:
+  sudo waydroid-kernelsu uts enable android-device localdomain
+  sudo waydroid-kernelsu uts kernel enable 6.12.0-android16-0-gki '#1 SMP PREEMPT ...'
+  waydroid-kernelsu uts show
+EOF
+}
+
+valid_release() {
+    local value=$1
+    [[ -n $value && ${#value} -le 64 && \
+       $value =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*([A-Za-z0-9]|\+)$ ]]
+}
+
+valid_version() {
+    local value=$1
+    [[ -n $value && ${#value} -le 64 && $value != *$'\n'* && $value != *$'\r'* ]]
+}
+
+die() {
+    echo "$program: $*" >&2
+    exit 1
+}
+
+require_root() {
+    (( EUID == 0 )) || die "run this command as root."
+}
+
+valid_dns_name() {
+    local value=$1 label
+    [[ -n $value && ${#value} -le 64 ]] || return 1
+    [[ $value != .* && $value != *. && $value != *..* ]] || return 1
+    while IFS= read -r label; do
+        [[ $label =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ || \
+           $label =~ ^[A-Za-z0-9]$ ]] || return 1
+    done < <(tr '.' '\n' <<< "$value")
+}
+
+read_config() {
+    enabled=0
+    configured_hostname=android-device
+    configured_domainname=localdomain
+    osrelease_enabled=0
+    configured_osrelease=
+    configured_version=
+    [[ -r $config_file ]] || return 0
+
+    local key value
+    while IFS='=' read -r key value; do
+        case $key in
+            enabled) enabled=$value ;;
+            hostname) configured_hostname=$value ;;
+            domainname) configured_domainname=$value ;;
+            osrelease_enabled) osrelease_enabled=$value ;;
+            osrelease) configured_osrelease=$value ;;
+            version) configured_version=$value ;;
+        esac
+    done < "$config_file"
+}
+
+validate_config() {
+    [[ $enabled == 0 || $enabled == 1 ]] || die "invalid enabled value in $config_file."
+    valid_dns_name "$configured_hostname" || \
+        die "invalid hostname in $config_file: $configured_hostname"
+    valid_dns_name "$configured_domainname" || \
+        die "invalid domainname in $config_file: $configured_domainname"
+    [[ $osrelease_enabled == 0 || $osrelease_enabled == 1 ]] || \
+        die "invalid osrelease_enabled value in $config_file."
+    if [[ $osrelease_enabled == 1 ]]; then
+        valid_release "$configured_osrelease" || \
+            die "invalid osrelease in $config_file: $configured_osrelease"
+        valid_version "$configured_version" || \
+            die "invalid version in $config_file."
+    fi
+}
+
+write_config() {
+    local new_enabled=$1 new_hostname=$2 new_domainname=$3
+    local new_osrelease_enabled=$4 new_osrelease=$5 new_version=$6 config_dir temporary
+    config_dir=${config_file%/*}
+    install -d -o root -g root -m 0755 "$config_dir"
+    temporary=$(mktemp "$config_dir/.uts-identity.conf.XXXXXX")
+    trap 'rm -f -- "${temporary:-}"' EXIT
+    printf '%s\n' \
+        '# Persistent UTS identity for the Waydroid container.' \
+        '# Managed with: waydroid-kernelsu uts enable HOSTNAME DOMAINNAME' \
+        "enabled=$new_enabled" \
+        "hostname=$new_hostname" \
+        "domainname=$new_domainname" \
+        "osrelease_enabled=$new_osrelease_enabled" \
+        "osrelease=$new_osrelease" \
+        "version=$new_version" > "$temporary"
+    chown root:root "$temporary"
+    chmod 0644 "$temporary"
+    mv -f -- "$temporary" "$config_file"
+    trap - EXIT
+}
+
+show_effective() {
+    local init_pid actual_hostname actual_domainname actual_osrelease actual_version
+    (( EUID == 0 )) || {
+        echo "Effective container identity: run with sudo to inspect a running container"
+        return 0
+    }
+    init_pid=$(lxc-info -P /var/lib/waydroid/lxc -n waydroid -pH 2>/dev/null || true)
+    if [[ ! $init_pid =~ ^[0-9]+$ ]]; then
+        echo "Effective container identity: unavailable (Waydroid is stopped)"
+        return 0
+    fi
+    actual_hostname=$(nsenter --target "$init_pid" --uts -- /bin/sh -c 'cat /proc/sys/kernel/hostname')
+    actual_domainname=$(nsenter --target "$init_pid" --uts -- /bin/sh -c 'cat /proc/sys/kernel/domainname')
+    actual_osrelease=$(nsenter --target "$init_pid" --uts -- /bin/sh -c 'cat /proc/sys/kernel/osrelease')
+    actual_version=$(nsenter --target "$init_pid" --uts -- /bin/sh -c 'cat /proc/sys/kernel/version')
+    echo "Effective container hostname: $actual_hostname"
+    echo "Effective container domainname: $actual_domainname"
+    echo "Effective container osrelease: $actual_osrelease"
+    echo "Effective container version: $actual_version"
+}
+
+command_name=${1:-show}
+shift || true
+case $command_name in
+    show)
+        (($# == 0)) || die "show does not accept arguments."
+        read_config
+        validate_config
+        echo "UTS identity: $([[ $enabled == 1 ]] && echo enabled || echo disabled)"
+        echo "Configured hostname: $configured_hostname"
+        echo "Configured domainname: $configured_domainname"
+        echo "UTS osrelease: $([[ $osrelease_enabled == 1 ]] && echo enabled || echo disabled)"
+        echo "Configured osrelease: ${configured_osrelease:-unchanged}"
+        echo "Configured version: ${configured_version:-unchanged}"
+        show_effective
+        ;;
+    enable)
+        require_root
+        (($# == 2)) || die "enable requires HOSTNAME and DOMAINNAME."
+        valid_dns_name "$1" || die "invalid hostname: $1"
+        valid_dns_name "$2" || die "invalid domainname: $2"
+        read_config
+        validate_config
+        write_config 1 "$1" "$2" "$osrelease_enabled" "$configured_osrelease" "$configured_version"
+        echo "UTS identity enabled: hostname=$1 domainname=$2"
+        echo "Restart the Waydroid container to apply it."
+        ;;
+    disable)
+        require_root
+        (($# == 0)) || die "disable does not accept arguments."
+        read_config
+        validate_config
+        write_config 0 "$configured_hostname" "$configured_domainname" \
+            "$osrelease_enabled" "$configured_osrelease" "$configured_version"
+        echo "UTS identity disabled."
+        echo "Restart the Waydroid container to restore Waydroid's default identity."
+        ;;
+    kernel|osrelease)
+        subcommand=${1:-show}
+        shift || true
+        read_config
+        validate_config
+        case $subcommand in
+            show)
+                (($# == 0)) || die "kernel show does not accept arguments."
+                echo "UTS kernel identity: $([[ $osrelease_enabled == 1 ]] && echo enabled || echo disabled)"
+                echo "Configured osrelease: ${configured_osrelease:-unchanged}"
+                echo "Configured version: ${configured_version:-unchanged}"
+                show_effective
+                ;;
+            enable)
+                require_root
+                (($# == 2)) || die "kernel enable requires RELEASE and VERSION."
+                valid_release "$1" || die "invalid osrelease: $1"
+                valid_version "$2" || die "invalid version."
+                write_config "$enabled" "$configured_hostname" \
+                    "$configured_domainname" 1 "$1" "$2"
+                echo "One-shot Waydroid kernel identity enabled: $1 / $2"
+                echo "Restart the Waydroid container to apply it."
+                ;;
+            disable)
+                require_root
+                (($# == 0)) || die "kernel disable does not accept arguments."
+                write_config "$enabled" "$configured_hostname" \
+                    "$configured_domainname" 0 "$configured_osrelease" "$configured_version"
+                echo "Waydroid kernel identity override disabled."
+                echo "Restart the Waydroid container to restore the real identity."
+                ;;
+            *) die "unknown kernel command: $subcommand" ;;
+        esac
+        ;;
+    help|-h|--help)
+        usage
+        ;;
+    *)
+        usage >&2
+        die "unknown UTS command: $command_name"
+        ;;
+esac

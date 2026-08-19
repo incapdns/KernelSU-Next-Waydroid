@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -u
+
+log() {
+    logger -t kernelsu-waydroid-unload -- "$*" 2>/dev/null || true
+}
+
+state_dir=/run/kernelsu-next-waydroid
+state_file=$state_dir/lifecycle.state
+lock_file=/run/kernelsu-waydroid-module.lock
+lxc_path=/var/lib/waydroid/lxc
+
+mkdir -p -m 0755 "$state_dir"
+[[ -r $state_file ]] || exit 0
+state=$(<"$state_file")
+case $state in
+    stop-pending|unhook-pending|unload-pending) ;;
+    *) exit 0 ;;
+esac
+
+exec 9>"$lock_file"
+flock -n 9 || exit 0
+state=$(<"$state_file")
+case $state in
+    stop-pending|unhook-pending|unload-pending) ;;
+    *) exit 0 ;;
+esac
+
+if ! grep -q '^kernelsu ' /proc/modules; then
+    printf 'unloaded\n' > "$state_file"
+    log "KernelSU already unloaded"
+    exit 0
+fi
+
+# STOPPED alone is insufficient: post-stop precedes lxc-start's return.
+lxc_state=$(timeout 2s lxc-info -P "$lxc_path" -n waydroid -sH 2>/dev/null || printf 'UNKNOWN')
+[[ $lxc_state == STOPPED ]] || exit 0
+if pgrep -af '(^|/)(lxc-start|lxc-stop).*([[:space:]]-n[[:space:]]+waydroid|[[:space:]]waydroid)' >/dev/null 2>&1; then
+    exit 0
+fi
+
+sleep 1
+lxc_state=$(timeout 2s lxc-info -P "$lxc_path" -n waydroid -sH 2>/dev/null || printf 'UNKNOWN')
+[[ $lxc_state == STOPPED ]] || exit 0
+if pgrep -af '(^|/)(lxc-start|lxc-stop).*([[:space:]]-n[[:space:]]+waydroid|[[:space:]]waydroid)' >/dev/null 2>&1; then
+    exit 0
+fi
+
+prepare_unload=/sys/module/kernelsu/parameters/prepare_unload
+if [[ ! -w $prepare_unload ]]; then
+    printf 'stop-failed\n' > "$state_file"
+    log "loaded module has no safe prepare_unload control; reboot required"
+    exit 0
+fi
+
+printf 'unhook-pending\n' > "$state_file"
+log "detaching global KernelSU callbacks before module unload"
+
+# EBUSY means a pinned callback or syscall frame still exists. Keep the
+# transition pending so the timer retries after its owning process drains.
+if ! printf '1\n' > "$prepare_unload" 2>/dev/null; then
+    log "safe unload is still busy; retry scheduled"
+    exit 0
+fi
+if [[ $(<"$prepare_unload") != Y ]]; then
+    log "safe unload preparation is incomplete; retry scheduled"
+    exit 0
+fi
+
+proc_hook_state=/sys/module/kernelsu/parameters/proc_modules_hook_state
+if [[ -r $proc_hook_state ]] && [[ $(<"$proc_hook_state") != detached* ]]; then
+    log "proc_modules hook has not drained; retry scheduled"
+    exit 0
+fi
+
+version_hook_state=/sys/module/kernelsu/parameters/proc_version_hook_state
+if [[ -r $version_hook_state ]] && [[ $(<"$version_hook_state") != detached* ]]; then
+    log "proc_version hook has not drained; retry scheduled"
+    exit 0
+fi
+
+printf 'unload-pending\n' > "$state_file"
+log "global callbacks detached; requesting module unload"
+if ! rmmod kernelsu 2>/dev/null; then
+    log "rmmod is still busy; retry scheduled"
+    exit 0
+fi
+if grep -q '^kernelsu ' /proc/modules; then
+    log "KernelSU remains loaded; retry scheduled"
+    exit 0
+fi
+
+printf 'unloaded\n' > "$state_file"
+log "KernelSU unloaded after complete Waydroid teardown"

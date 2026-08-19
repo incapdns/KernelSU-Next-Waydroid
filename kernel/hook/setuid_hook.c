@@ -22,6 +22,7 @@
 #include "hook/tp_marker.h"
 #include "feature/kernel_umount.h"
 #include "ksu.h"
+#include "feature/susfs_bridge.h"
 
 #ifdef CONFIG_KSU_NON_ANDROID
 static atomic_t waydroid_data_initialized = ATOMIC_INIT(0);
@@ -86,6 +87,7 @@ int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid)
 
     // Handle kernel umount
     ksu_handle_umount(old_uid, new_uid);
+    ksu_susfs_bridge_mark_app(old_uid, new_uid);
 
     return 0;
 }

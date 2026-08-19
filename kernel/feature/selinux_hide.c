@@ -14,6 +14,7 @@
 #include <net/genetlink.h>
 #include <linux/moduleparam.h>
 #include <linux/mutex.h>
+#include <linux/susfs_ksu.h>
 // security/selinux/include/security.h
 #include <security.h>
 #include <ss/context.h>
@@ -28,6 +29,8 @@
 #include "ksu.h"
 #include "policy/feature.h"
 #include "hook/lsm_hook.h"
+#include "hook/syscall_hook_manager.h"
+#include "feature/susfs_bridge.h"
 
 static DEFINE_MUTEX(selinux_hide_mutex);
 static bool ksu_selinux_hide_enabled __read_mostly = false;
@@ -199,6 +202,60 @@ out:
 static int my_setprocattr(const char *name, void *value, size_t size);
 struct ksu_lsm_hook selinux_setprocattr_hook = KSU_LSM_HOOK_INIT(setprocattr, "selinux_setprocattr", my_setprocattr, 0);
 
+static int my_getprocattr(struct task_struct *task, const char *name, char **value);
+static struct ksu_lsm_hook selinux_getprocattr_hook =
+    KSU_LSM_HOOK_INIT(getprocattr, "selinux_getprocattr", my_getprocattr, 0);
+
+typedef int (*getprocattr_fn)(struct task_struct *task, const char *name, char **value);
+
+static bool ksu_task_comm_has_suffix(struct task_struct *task, const char *suffix)
+{
+    char comm[TASK_COMM_LEN];
+    size_t comm_len, suffix_len;
+
+    get_task_comm(comm, task);
+    comm_len = strlen(comm);
+    suffix_len = strlen(suffix);
+    return comm_len >= suffix_len &&
+           !memcmp(comm + comm_len - suffix_len, suffix, suffix_len);
+}
+
+/*
+ * Waydroid shares the host SELinux LSM, so its Android tasks legitimately
+ * retain the host container domain (normally initrc_t).  The Android
+ * selinuxfs proxy exposes the guest policy, however, and userspace therefore
+ * expects /proc/<pid>/attr/current to use guest policy names as well.  Keep
+ * the real SID for host authorization and virtualize only this read surface
+ * for unprivileged readers in the registered Waydroid PID namespace.
+ */
+static int __nocfi my_getprocattr(struct task_struct *task, const char *name,
+                                 char **value)
+{
+    static const char app_context[] = "u:r:untrusted_app:s0";
+    static const char app_zygote_context[] = "u:r:app_zygote:s0";
+    const char *context;
+    char *replacement;
+    int ret;
+
+    ret = ((getprocattr_fn)selinux_getprocattr_hook.original)(task, name,
+                                                              value);
+    if (ret < 0 || !READ_ONCE(ksu_selinux_hide_enabled) ||
+        strcmp(name, "current") || current_uid().val < 10000 ||
+        task_uid(task).val < 10000 || !ksu_is_waydroid_task(current) ||
+        !ksu_is_waydroid_task(task))
+        return ret;
+
+    context = ksu_task_comm_has_suffix(task, "_zygote") ?
+              app_zygote_context : app_context;
+    replacement = kstrdup(context, GFP_KERNEL);
+    if (!replacement)
+        return ret;
+
+    kfree(*value);
+    *value = replacement;
+    return strlen(context) + 1;
+}
+
 typedef int (*setprocattr_fn)(const char *name, void *value, size_t size);
 static int __nocfi my_setprocattr(const char *name, void *value, size_t size)
 {
@@ -313,8 +370,18 @@ static int ksu_selinux_hide_enable()
 {
     int ret;
     pr_info("selinux_hide: init selinux hide\n");
+    ret = ksu_lsm_hook(&selinux_getprocattr_hook);
+    if (ret) {
+        pr_err("selinux_hide: init: selinux_getprocattr_hook err: %d\n", ret);
+        return ret;
+    }
+#ifdef CONFIG_KSU_SUSFS
+    susfs_ksu_initialize_fake_status();
+    return 0;
+#endif
     if (!backup_sepolicy) {
         pr_err("no backup sepolicy available, please save feature and reboot to retry!\n");
+        ksu_lsm_unhook(&selinux_getprocattr_hook);
         return -EAGAIN;
     }
     selinux_write_op = find_kernel_symbol_exact("write_op");
@@ -397,6 +464,7 @@ static void ksu_selinux_hide_unhook()
             pr_err("selinux_hide: exit: patch_text sel_open_handle_status err: %d\n", ret);
         }
     }
+    ksu_lsm_unhook(&selinux_getprocattr_hook);
     ksu_lsm_unhook(&selinux_setprocattr_hook);
 }
 
@@ -418,7 +486,6 @@ static int selinux_hide_feature_set(u64 value)
     int ret = 0;
     pr_info("selinux_hide: set to %d\n", enable);
     mutex_lock(&selinux_hide_mutex);
-    ksu_selinux_hide_enabled = enable;
     if (enable) {
         if (!ksu_selinux_hide_running) {
             ret = ksu_selinux_hide_enable();
@@ -426,13 +493,16 @@ static int selinux_hide_feature_set(u64 value)
                 ksu_selinux_hide_running = true;
             }
         }
+        ksu_selinux_hide_enabled = ksu_selinux_hide_running;
     } else {
         if (ksu_selinux_hide_running) {
             ksu_selinux_hide_disable();
             ksu_selinux_hide_running = false;
         }
+        ksu_selinux_hide_enabled = false;
     }
     mutex_unlock(&selinux_hide_mutex);
+    ksu_susfs_bridge_sync_selinux();
     return ret;
 }
 
@@ -445,6 +515,10 @@ static const struct ksu_feature_handler selinux_hide_handler = {
 
 void ksu_selinux_hide_handle_second_stage()
 {
+#ifdef CONFIG_KSU_SUSFS
+    susfs_ksu_initialize_fake_status();
+    return;
+#else
     initialize_fake_status();
     // https://github.com/torvalds/linux/blame/e8c2f9fdadee7cbc75134dc463c1e0d856d6e5c7/security/selinux/selinuxfs.c#L2014
     if (fake_status) {
@@ -452,14 +526,21 @@ void ksu_selinux_hide_handle_second_stage()
     } else {
         pr_warn("selinux_hide: fake status need late initialization\n");
     }
+#endif
 }
 
 void ksu_selinux_hide_handle_post_fs_data()
 {
+#ifdef CONFIG_KSU_SUSFS
+    susfs_ksu_initialize_fake_status();
+    if (!susfs_ksu_fake_status())
+        pr_err("selinux_hide: built-in fake status is not initialized after post-fs-data!\n");
+#else
     static_key_disable(&fake_status_initialize_key.key);
     if (!fake_status) {
         pr_err("selinux_hide: fake status is not initialized after post-fs-data!\n");
     }
+#endif
 }
 
 static void hook_selinux_status_open()
@@ -489,12 +570,16 @@ void __init ksu_selinux_hide_init()
     if (ksu_register_feature_handler(&selinux_hide_handler)) {
         pr_err("Failed to register selinux_hide feature handler\n");
     }
+#ifdef CONFIG_KSU_SUSFS
+    susfs_ksu_initialize_fake_status();
+#else
     if (ksu_late_loaded) {
         initialize_fake_status();
     } else {
         static_key_enable(&fake_status_initialize_key.key);
     }
     hook_selinux_status_open();
+#endif
 }
 
 void __exit ksu_selinux_hide_exit()
@@ -518,12 +603,25 @@ void ksu_selinux_hide_drop_backup_if_unused()
     mutex_lock(&selinux_hide_mutex);
     if (!ksu_selinux_hide_running && backup_sepolicy) {
         pr_info("selinux_hide is not enabled - drop backup_sepolicy\n");
+#ifdef CONFIG_KSU_SUSFS
+        susfs_ksu_synchronize();
+#endif
         sidtab_destroy(backup_sepolicy->sidtab);
         kfree(backup_sepolicy->sidtab);
         ksu_destroy_sepolicy(backup_sepolicy);
         backup_sepolicy = NULL;
     }
     mutex_unlock(&selinux_hide_mutex);
+}
+
+bool ksu_selinux_hide_is_enabled(void)
+{
+    return READ_ONCE(ksu_selinux_hide_enabled);
+}
+
+bool ksu_selinux_hide_is_running(void)
+{
+    return READ_ONCE(ksu_selinux_hide_running);
 }
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)

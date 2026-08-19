@@ -4,27 +4,77 @@ set -euo pipefail
 log() {
     logger -t kernelsu-waydroid-pre-start -- "$*" 2>/dev/null || true
 }
-trap 'status=$?; log "failed at line $LINENO with status $status"' ERR
 
-# lxc.hook.pre-start runs in the host namespace after the previous container
-# has stopped and before the next Android init exists. KernelSU boot stages are
-# one-shot per module load, so every new container init requires a fresh module
-# lifecycle for post-fs-data and pre-Zygote modules such as Zygisk Next.
-exec 9>/run/kernelsu-waydroid-pre-start.lock
-flock 9
+state_dir=/run/kernelsu-next-waydroid
+state_file=$state_dir/lifecycle.state
+lock_file=/run/kernelsu-waydroid-module.lock
+
+read_state() {
+    local state
+
+    if [[ -r $state_file ]]; then
+        IFS= read -r state < "$state_file" || true
+        printf '%s' "${state:-invalid}"
+    else
+        printf 'unknown'
+    fi
+}
+
+mark_start_failed() {
+    local status=$?
+    printf 'stop-failed\n' > "$state_file"
+    log "start failed at line ${BASH_LINENO[0]} with status ${status}"
+    exit "$status"
+}
+
+# lxc.hook.pre-start runs before Android init exists. A start is never queued
+# behind another lifecycle transition: it is accepted only from UNLOADED.
+mkdir -p -m 0755 "$state_dir"
+trap mark_start_failed ERR
+
+exec 9>"$lock_file"
+if ! flock -n 9; then
+    state=$(read_state)
+    echo "${0##*/}: lifecycle is ${state}; start refused until UNLOADED" >&2
+    log "start refused while lifecycle is ${state}"
+    exit 4
+fi
+
+state=$(read_state)
+case $state in
+    unloaded|unknown)
+        ;;
+    stop-pending|unhook-pending|unload-pending|stop-failed|starting|running)
+        echo "${0##*/}: lifecycle is ${state}; start refused" >&2
+        log "start refused while lifecycle is ${state}"
+        exit 5
+        ;;
+    *)
+        echo "${0##*/}: invalid lifecycle state: ${state}" >&2
+        log "start refused because lifecycle state is invalid: ${state}"
+        exit 6
+        ;;
+esac
+
+printf 'starting\n' > "$state_file"
+
+/usr/lib/kernelsu-next-waydroid/sync-brene-uts
+/usr/lib/kernelsu-next-waydroid/configure-osrelease validate
 
 if grep -q '^kernelsu ' /proc/modules; then
-    log "resetting KernelSU safely before Waydroid init"
-    timeout --signal=TERM --kill-after=5s 30s \
-        /usr/lib/kernelsu-next-waydroid/load-module --unload-first
+    log "KernelSU is already loaded before Waydroid init"
+    /usr/lib/kernelsu-next-waydroid/configure-osrelease apply
 else
     log "loading KernelSU before Waydroid init"
     timeout --signal=TERM --kill-after=5s 30s \
         /usr/lib/kernelsu-next-waydroid/load-module
 fi
 
-grep -q '^kernelsu ' /proc/modules || {
+if ! grep -q '^kernelsu ' /proc/modules; then
+    printf 'stop-failed\n' > "$state_file"
     echo "${0##*/}: kernelsu module is not loaded" >&2
     exit 1
-}
+fi
+
+printf 'running\n' > "$state_file"
 log "KernelSU is ready for Waydroid init"

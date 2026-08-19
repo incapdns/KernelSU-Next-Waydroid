@@ -83,6 +83,8 @@ jobs:
 
       - name: Spoof Package ID
         if: matrix.spoofed == true
+        env:
+          KSU_SPOOF_PACKAGE_ID: ${{ vars.KSU_SPOOF_PACKAGE_ID }}
         run: |
           chmod +x spoof
           ./spoof

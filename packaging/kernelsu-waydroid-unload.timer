@@ -1,0 +1,11 @@
+[Unit]
+Description=Retry pending KernelSU Waydroid teardown
+
+[Timer]
+OnBootSec=5s
+OnUnitInactiveSec=2s
+AccuracySec=250ms
+Unit=kernelsu-waydroid-unload.service
+
+[Install]
+WantedBy=timers.target

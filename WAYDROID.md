@@ -7,12 +7,12 @@ when upstream moves.
 
 ## What this project builds
 
-The project produces two artifacts:
+The project produces two coordinated release artifacts:
 
 - `kernel/out-waydroid/kernelsu.ko`: an external module built against the
   headers of the exact host kernel release;
-- `userspace/ksud/target/x86_64-linux-android/release/ksud`: the daemon that
-  runs inside Android x86_64.
+- the Manager APK, which embeds ABI-matched `ksud` binaries for both
+  `arm64-v8a` and `x86_64`.
 
 It does **not rebuild the full Linux kernel**, create a `boot.img`, or modify a
 Waydroid image. The module builder invokes the installed kernel's Kbuild with
@@ -40,15 +40,17 @@ from this document:
   the LXC seccomp restriction inherited by Android init;
 - makes Android's in-kernel SELinux integration optional because the module is
   loaded into a distribution kernel;
+- virtualizes `/proc/modules`, OverlayFS `statfs`, and the build identity in
+  `/proc/version` only for non-privileged Waydroid readers while preserving
+  the host/root view;
 - safely detaches global x86_64 dispatcher patches before module removal;
 - resets KernelSU's one-shot boot hooks before each Waydroid init so that
   `post-fs-data` runs before Zygote;
-- retains `ksud late-load` only as manual recovery for an already-running
-  container.
+- obtains `ksud` only from the signed Manager APK, avoiding a second host copy
+  that can drift from or race the Manager's embedded binary.
 
-The patched `ksud` also publishes a marker after its blocking late-load stages
-finish and relaunches the actual Manager package, including randomized package
-names.
+Ordinary Android processes retain the LXC `reboot(2)` seccomp denial. KernelSU
+boot integration does not require globally exposing its reboot-magic transport.
 
 ## Why internal scripts remain
 
@@ -58,7 +60,6 @@ actors execute them in different contexts:
 
 - the `pre-start` hook runs on the host before the next Android init exists;
 - the `mount` hook runs in the mount namespace prepared by LXC;
-- late-load runs after boot and only for recovery;
 - the auditor is read-only and examines an existing container namespace.
 
 Merging those contexts into one large script would reduce the file count but
@@ -83,26 +84,17 @@ certificate: compatible artifacts belong to the same release.
 
 ## Build and package
 
-Build dependencies are the running kernel's headers, a module toolchain
-(`make` and Clang), Rust/Cargo managed by `rustup`, and the Android NDK. The CLI
-finds the packaged NDK automatically; Docker, Podman, and `cross` are not part
-of the build path:
+Host-package build dependencies are the running kernel's headers and a module
+toolchain (`make` and Clang). Manager release CI separately builds both Android
+`ksud` ABIs and embeds them before Gradle packages the APK:
 
 ```sh
-paru -S android-ndk
-rustup default stable
-rustup target add x86_64-linux-android
 ./waydroid-kernelsu package
 sudo ./waydroid-kernelsu install
 ```
 
-The NDK package exposes one stable path, `/opt/android-ndk`; its release number
-is not duplicated in this repository. `ANDROID_NDK_HOME` remains available for
-custom installations, and `KSU_ANDROID_API` can override the default API 26
-compiler when required.
-
-`package` rebuilds `kernelsu.ko`, rebuilds Android x86_64 `ksud`, and runs
-`makepkg`. `install` selects only the newest matching output instead of passing
+`package` rebuilds `kernelsu.ko` and runs `makepkg`. `install` selects only the
+newest matching output instead of passing
 an ambiguous wildcard with old packages to pacman. `pkgver` is evaluated directly
 from `git describe`; there is no manual version to synchronize. `pkgrel` remains
 because it is the Arch packaging revision, not a second KernelSU version.
@@ -124,8 +116,26 @@ waydroid show-full-ui
 ```
 
 The configurator preserves backups of the seccomp profile and LXC config. It
-removes only the exact `reboot` entry from the denylist and registers the mount
-and pre-start hooks.
+ensures that the exact `reboot` entry remains in the denylist and registers the
+mount and lifecycle hooks.
+
+The host hooks serialize the external module lifecycle through
+`/run/kernelsu-next-waydroid/lifecycle.state`. `post-stop` only publishes
+`stop-pending` and queues `kernelsu-waydroid-unload.service`; it never unloads
+module text from inside the `lxc-start` teardown stack. The reconciler requires
+LXC to report `STOPPED`, requires every Waydroid `lxc-start`/`lxc-stop` process
+to have exited, waits one additional second, and only then requests safe
+unload. A systemd timer retries pending work, including after the hook or
+worker is killed. `pre-start` accepts only `unloaded` (or the initial state
+after boot), so a new start remains refused until teardown really completes.
+
+The x86 syscall wrappers pin `kernelsu.ko` while a raw syscall-table entry has
+a return address in module text. `prepare_unload` restores every global entry
+point first and refuses to release the final guard while such a frame is still
+active. The same preparation unregisters the `/proc/version` return probe,
+restores the `/proc/modules` and OverlayFS callbacks, and waits for their
+per-call references and counters to drain. This prevents the observed `read`
+return use-after-free.
 
 Available commands:
 
@@ -137,7 +147,85 @@ waydroid-kernelsu configure   # configure LXC and seccomp integration
 waydroid-kernelsu status      # display effective state
 waydroid-kernelsu audit       # audit the container mounts
 waydroid-kernelsu reload      # safe module reload, with Waydroid stopped
-waydroid-kernelsu recover     # manual late-load recovery
+waydroid-kernelsu uts         # manage the container hostname/domainname
+```
+
+## Isolated UTS identity
+
+Waydroid already starts in a UTS namespace separate from the host. UTS is a
+kernel namespace, not a filesystem such as FUSE: each namespace owns the
+values returned as hostname and NIS domainname. The host keeps its own values,
+and every process created inside Waydroid observes the container values.
+
+The userspace layer intentionally changes only `hostname` and `domainname`.
+An optional KernelSU layer can additionally replace the `release` + `version`
+pair exactly once and atomically in the Waydroid UTS. It never changes
+`machine`, and it refuses the initial host UTS namespace. The host-side loader reads
+`/proc/sys/kernel/osrelease` before the container starts, rather than trusting
+`uname -r`, so a SUSFS read-time uname spoof cannot select the wrong module.
+
+Enable a persistent identity and inspect the configuration with:
+
+```sh
+sudo waydroid-kernelsu uts enable android-device localdomain
+sudo waydroid-kernelsu uts kernel enable 6.12.0-android16-0-gki '#1 SMP PREEMPT Tue Jan 2 03:04:05 UTC 2024'
+waydroid-kernelsu uts show
+waydroid session stop
+sudo systemctl restart waydroid-container
+waydroid show-full-ui
+sudo waydroid-kernelsu uts show
+sudo waydroid-kernelsu audit
+```
+
+The first `show` reports the desired values. The second, after the container
+restart, also reads the effective values from the running container's UTS
+namespace. `audit` fails if the configured and effective identities differ.
+No command restarts Waydroid implicitly.
+
+At startup, LXC creates the isolated namespaces and invokes the mount hook in
+the container namespace before `pivot_root` and Android init. The hook writes
+the configured values through the container procfs files
+`/proc/sys/kernel/hostname` and `/proc/sys/kernel/domainname`, then reads them
+back for verification. Because LXC protects `/proc/sys` with a read-only bind,
+the hook makes only that container-side bind writable for these two writes and
+restores it to read-only before Android init can run. The persistent source is:
+
+```text
+/etc/kernelsu-next-waydroid/uts-identity.conf
+```
+
+Use the public command instead of editing that file by hand; it validates DNS
+label syntax and both kernel-identity fields, then writes the configuration
+atomically.
+
+The kernel-identity path is kernel-side. Before LXC creates Android PID 1, the
+host pre-start hook loads `kernelsu.ko` and stages both configured values in
+the root-only `waydroid_osrelease` and `waydroid_version` module parameters.
+The existing exec tracepoint
+then recognizes `/system/bin/init`, rejects `init_uts_ns`, retains a reference
+to the container UTS, saves its original pair under `uts_sem`, and performs
+one atomic replacement. Parameter writes return `EBUSY` after consumption. Android
+init exit restores the original pair and releases the namespace reference;
+module teardown repeats that restoration idempotently as a safety fallback.
+The retired reboot supercall can no longer mutate `release` or `version`.
+
+BRENE does not contain a genuine Pixel kernel identity in its PIF profile;
+those profiles contain Android build and attestation properties only. Its
+optional **Sync with Waydroid UTS** control therefore publishes the effective
+`uname -r`/`uname -v` pair to `/data/adb/brene/waydroid-uts.conf`. The host
+pre-start hook discovers the Waydroid data bind, rejects symlinks or unsafe
+ownership/mode, validates the request, and synchronizes the persistent host
+configuration for the next init. Android is never given write access to host
+`/etc`.
+
+Disable both overrides and return to the real/default identity on the next
+restart with:
+
+```sh
+sudo waydroid-kernelsu uts disable
+sudo waydroid-kernelsu uts kernel disable
+waydroid session stop
+sudo systemctl restart waydroid-container
 ```
 
 `reload` prepares the dispatcher for unload, removes the module, and loads it

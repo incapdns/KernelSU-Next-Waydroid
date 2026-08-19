@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+program=${0##*/}
+uts_config=${KSU_WAYDROID_UTS_CONFIG:-/etc/kernelsu-next-waydroid/uts-identity.conf}
+osrelease_enabled=0
+configured_osrelease=
+configured_version=
+
+if [[ -r $uts_config ]]; then
+    while IFS='=' read -r key value; do
+        case $key in
+            osrelease_enabled) osrelease_enabled=$value ;;
+            osrelease) configured_osrelease=$value ;;
+            version) configured_version=$value ;;
+        esac
+    done < "$uts_config"
+fi
+[[ $osrelease_enabled == 0 || $osrelease_enabled == 1 ]] || {
+    echo "$program: invalid osrelease_enabled in $uts_config." >&2
+    exit 1
+}
+if [[ $osrelease_enabled == 1 ]]; then
+    [[ -n $configured_osrelease && ${#configured_osrelease} -le 64 && \
+       $configured_osrelease =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*([A-Za-z0-9]|\+)$ ]] || {
+        echo "$program: invalid osrelease in $uts_config." >&2
+        exit 1
+    }
+    [[ -n $configured_version && ${#configured_version} -le 64 && \
+       $configured_version != *$'\n'* && $configured_version != *$'\r'* ]] || {
+        echo "$program: invalid version in $uts_config." >&2
+        exit 1
+    }
+fi
+
+case ${1:-apply} in
+    validate)
+        (($# == 1)) || exit 2
+        exit 0
+        ;;
+    apply)
+        (($# <= 1)) || exit 2
+        (( EUID == 0 )) || {
+            echo "$program: run as root." >&2
+            exit 1
+        }
+        osrelease_parameter=/sys/module/kernelsu/parameters/waydroid_osrelease
+        version_parameter=/sys/module/kernelsu/parameters/waydroid_version
+        [[ -w $osrelease_parameter ]] || {
+            echo "$program: missing writable module parameter: $osrelease_parameter" >&2
+            exit 1
+        }
+        [[ -w $version_parameter ]] || {
+            echo "$program: missing writable module parameter: $version_parameter" >&2
+            exit 1
+        }
+        if [[ $osrelease_enabled == 1 ]]; then
+            printf '%s\n' "$configured_osrelease" > "$osrelease_parameter"
+            printf '%s\n' "$configured_version" > "$version_parameter"
+            [[ $(<"$osrelease_parameter") == "$configured_osrelease" ]] || {
+                echo "$program: failed to verify the Waydroid osrelease parameter." >&2
+                exit 1
+            }
+            [[ $(<"$version_parameter") == "$configured_version" ]] || {
+                echo "$program: failed to verify the Waydroid version parameter." >&2
+                exit 1
+            }
+        else
+            printf '\n' > "$osrelease_parameter"
+            printf '\n' > "$version_parameter"
+        fi
+        ;;
+    *)
+        echo "Usage: $program [validate|apply]" >&2
+        exit 2
+        ;;
+esac

@@ -19,6 +19,7 @@
 #include <linux/workqueue.h>
 #include <linux/uio.h>
 #include <linux/stat.h>
+#include <linux/module.h>
 
 #include "arch.h"
 #include "klog.h" // IWYU pragma: keep
@@ -568,12 +569,27 @@ void ksu_execveat_hook_ksud(const struct pt_regs *regs)
 static long (*orig_sys_read)(const struct pt_regs *regs);
 static long ksu_sys_read(const struct pt_regs *regs)
 {
-    unsigned int fd = PT_REGS_PARM1(regs);
+#if defined(MODULE) && defined(__x86_64__)
+	if (unlikely(!try_module_get(THIS_MODULE))) {
+		__attribute__((musttail)) return orig_sys_read(regs);
+	}
+#endif
+	unsigned int fd = PT_REGS_PARM1(regs);
     char __user **buf_ptr = (char __user **)&PT_REGS_PARM2(regs);
     size_t *count_ptr = (size_t *)&PT_REGS_PARM3(regs);
 
     ksu_handle_sys_read(fd, buf_ptr, count_ptr);
-    return orig_sys_read(regs);
+#if defined(MODULE) && defined(__x86_64__)
+	/* read(2) may block indefinitely.  Drop the short callback pin and
+	 * require a tail call so the original syscall returns directly to the
+	 * kernel dispatcher, with neither a reference nor a return address in
+	 * this module.  prepare_unload restores the table and synchronizes RCU
+	 * Tasks before releasing the permanent unload guard. */
+	module_put(THIS_MODULE);
+	__attribute__((musttail)) return orig_sys_read(regs);
+#else
+	return orig_sys_read(regs);
+#endif
 }
 
 static long (*orig_sys_fstat)(const struct pt_regs *regs);
@@ -582,7 +598,12 @@ static long ksu_sys_fstat(const struct pt_regs *regs)
     unsigned int fd = PT_REGS_PARM1(regs);
     void __user *statbuf = (void __user *)PT_REGS_PARM2(regs);
     bool is_rc = false;
-    long ret;
+	long ret;
+
+#if defined(MODULE) && defined(__x86_64__)
+	if (unlikely(!try_module_get(THIS_MODULE)))
+		return orig_sys_fstat(regs);
+#endif
 
     struct file *file = fget(fd);
     if (file) {
@@ -613,7 +634,10 @@ static long ksu_sys_fstat(const struct pt_regs *regs)
         }
     }
 
-    return ret;
+#if defined(MODULE) && defined(__x86_64__)
+	module_put(THIS_MODULE);
+#endif
+	return ret;
 }
 
 static int input_handle_event_handler_pre(struct kprobe *p, struct pt_regs *regs)
@@ -659,8 +683,17 @@ void __init ksu_ksud_init()
 {
     int ret;
 
-    ksu_syscall_table_hook(__NR_read, ksu_sys_read, &orig_sys_read);
-    ksu_syscall_table_hook(__NR_fstat, ksu_sys_fstat, &orig_sys_fstat);
+    /* These hooks exist only to observe Android init's first read of
+     * /system/etc/init/hw/init.rc.  A late-loaded module necessarily missed
+     * that event already.  Installing the read hook at that point leaves it
+     * active indefinitely and can pin the module behind blocking reads,
+     * preventing a safe unload after the container stops. */
+    if (!ksu_late_loaded) {
+        ksu_syscall_table_hook(__NR_read, ksu_sys_read, &orig_sys_read);
+        ksu_syscall_table_hook(__NR_fstat, ksu_sys_fstat, &orig_sys_fstat);
+    } else {
+        pr_info("late load: skip one-shot init.rc syscall hooks\n");
+    }
 
     ret = register_kprobe(&input_event_kp);
     input_hook_registered = (ret == 0);

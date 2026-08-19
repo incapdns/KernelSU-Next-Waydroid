@@ -22,6 +22,12 @@
 #include "klog.h" // IWYU pragma: keep
 #include "hook/syscall_hook_manager.h"
 #include "hook/tp_marker.h"
+#include "runtime/waydroid_uts.h"
+#ifdef CONFIG_KSU_NON_ANDROID
+#include "feature/proc_modules_hide.h"
+#include "feature/overlayfs_statfs_hide.h"
+#include "feature/proc_version_hide.h"
+#endif
 #include "feature/sucompat.h"
 #include "hook/setuid_hook.h"
 #include "hook/syscall_hook.h"
@@ -142,7 +148,8 @@ static void ksu_waydroid_exec(void *data, struct task_struct *task,
     if (task_active_pid_ns(task) == &init_pid_ns)
         return;
 
-    if (task_pid_vnr(task) == 1 && !strcmp(path, "/system/bin/init")) {
+    if (task_pid_vnr(task) == 1 &&
+        (!strcmp(path, "/init") || !strcmp(path, "/system/bin/init"))) {
         struct pid_namespace *old_ns;
         struct pid_namespace *new_ns = get_pid_ns(task_active_pid_ns(task));
 
@@ -157,6 +164,8 @@ static void ksu_waydroid_exec(void *data, struct task_struct *task,
         ksu_set_task_tracepoint_flag(task);
         pr_info("hook_manager: Waydroid init started as host pid %d\n",
                 waydroid_init_host_pid);
+        if (ksu_waydroid_uts_apply_once(task) == -EPERM)
+            pr_err("hook_manager: Waydroid UTS osrelease was not applied\n");
         return;
     }
 
@@ -205,6 +214,7 @@ static void ksu_waydroid_exit(void *data, struct task_struct *task)
     spin_unlock(&waydroid_state_lock);
     if (old_ns)
         put_pid_ns(old_ns);
+    ksu_waydroid_uts_restore();
     pr_info("hook_manager: Waydroid init stopped\n");
 }
 #else
@@ -265,6 +275,7 @@ void __init ksu_syscall_hook_manager_init(void)
     ksu_register_syscall_hook(__NR_execveat, ksu_hook_execveat);
     ksu_register_syscall_hook(__NR_newfstatat, ksu_hook_newfstatat);
     ksu_register_syscall_hook(__NR_faccessat, ksu_hook_faccessat);
+    ksu_register_syscall_hook(__NR_reboot, ksu_hook_reboot);
 
 #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
     ret = register_trace_prio_sys_enter(ksu_sys_enter_handler, NULL, INT_MIN);
@@ -294,6 +305,11 @@ void __init ksu_syscall_hook_manager_init(void)
 #endif
 #endif
 
+#ifdef CONFIG_KSU_NON_ANDROID
+    ksu_proc_modules_hide_init();
+    ksu_overlayfs_statfs_hide_init();
+    ksu_proc_version_hide_init();
+#endif
     ksu_setuid_hook_init();
     ksu_sucompat_init();
     ksu_avc_spoof_init();
@@ -306,6 +322,11 @@ void __exit ksu_syscall_hook_manager_exit(void)
     spin_lock(&waydroid_state_lock);
     waydroid_trace_enabled = false;
     spin_unlock(&waydroid_state_lock);
+
+    /* Remove raw callback pointers before any module-owned state is torn down. */
+    ksu_proc_version_hide_exit();
+    ksu_overlayfs_statfs_hide_exit();
+    ksu_proc_modules_hide_exit();
 #endif
 
 #ifdef CONFIG_KRETPROBES
@@ -336,6 +357,8 @@ void __exit ksu_syscall_hook_manager_exit(void)
     tracepoint_synchronize_unregister();
     pr_emerg("exit: tracepoints removed and synchronized\n");
 #endif
+
+    ksu_waydroid_uts_restore();
 
 #ifdef CONFIG_KSU_NON_ANDROID
     {

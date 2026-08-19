@@ -22,6 +22,61 @@ container_getprop() {
         /system/bin/getprop "$1" 2>/dev/null | tr -d '\r'
 }
 
+check_uts_identity() {
+    local config=/etc/kernelsu-next-waydroid/uts-identity.conf
+    local enabled=0 expected_hostname= expected_domainname= key value
+    local osrelease_enabled=0 expected_osrelease= expected_version=
+    local actual_hostname actual_domainname actual_osrelease actual_version result=0
+    [[ -r $config ]] || {
+        printf 'INFO %-24s no persistent configuration\n' UTS
+        return 0
+    }
+    while IFS='=' read -r key value; do
+        case $key in
+            enabled) enabled=$value ;;
+            hostname) expected_hostname=$value ;;
+            domainname) expected_domainname=$value ;;
+            osrelease_enabled) osrelease_enabled=$value ;;
+            osrelease) expected_osrelease=$value ;;
+            version) expected_version=$value ;;
+        esac
+    done < "$config"
+    actual_hostname=$(nsenter --target "$waydroid_init_pid" --uts -- \
+        /bin/sh -c 'cat /proc/sys/kernel/hostname')
+    actual_domainname=$(nsenter --target "$waydroid_init_pid" --uts -- \
+        /bin/sh -c 'cat /proc/sys/kernel/domainname')
+    actual_osrelease=$(nsenter --target "$waydroid_init_pid" --uts -- \
+        /bin/sh -c 'cat /proc/sys/kernel/osrelease')
+    actual_version=$(nsenter --target "$waydroid_init_pid" --uts -- \
+        /bin/sh -c 'cat /proc/sys/kernel/version')
+    if [[ $enabled != 1 ]]; then
+        printf 'INFO %-24s custom identity disabled\n' UTS
+    elif [[ $actual_hostname == "$expected_hostname" && \
+            $actual_domainname == "$expected_domainname" ]]; then
+        printf 'PASS %-24s hostname=%s domainname=%s\n' \
+            UTS "$actual_hostname" "$actual_domainname"
+    else
+        printf 'FAIL %-24s expected %s/%s, got %s/%s\n' \
+            UTS "$expected_hostname" "$expected_domainname" \
+            "$actual_hostname" "$actual_domainname"
+        result=1
+    fi
+    if [[ $osrelease_enabled != 1 ]]; then
+        printf 'INFO %-24s osrelease override disabled (%s)\n' \
+            UTS-osrelease "$actual_osrelease"
+    elif [[ $actual_osrelease == "$expected_osrelease" && \
+            $actual_version == "$expected_version" ]]; then
+        printf 'PASS %-24s %s / %s\n' UTS-kernel \
+            "$actual_osrelease" "$actual_version"
+    else
+        printf 'FAIL %-24s expected %s / %s, got %s / %s\n' \
+            UTS-kernel "$expected_osrelease" "$expected_version" \
+            "$actual_osrelease" "$actual_version"
+        result=1
+    fi
+    return "$result"
+}
+
 android_sdk=$(container_getprop ro.build.version.sdk)
 [[ $android_sdk =~ ^[0-9]+$ ]] || {
     echo "${0##*/}: could not determine the Android SDK level." >&2
@@ -253,6 +308,7 @@ classify_mount() {
 }
 
 failed=0
+check_uts_identity || failed=1
 check_fs /proc proc || failed=1
 check_option /proc hidepid=2 hidepid=invisible || failed=1
 check_option /proc gid=3009 gid=readproc || failed=1

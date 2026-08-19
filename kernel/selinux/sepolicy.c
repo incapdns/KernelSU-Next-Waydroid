@@ -975,23 +975,29 @@ struct selinux_policy *ksu_dup_sepolicy(struct selinux_policy *old_pol)
         goto out_free_data;
     }
 
-    // https://android-review.googlesource.com/c/kernel/common/+/3009995/11/security/selinux/ss/policydb.c
-    // fixup config
-    // 4*2+8+4
+#if defined(POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE) || \
+    defined(POLICYDB_CONFIG_ANDROID_NETLINK_GETNEIGH)
+    // Android kernels serialize two additional policydb config flags. Keep
+    // their wire-format fixup only when the target policydb exposes them.
     static const size_t kConfigOff = 20;
     if (len >= kConfigOff + sizeof(u32)) {
         u32 *config_ptr = (u32 *)((unsigned long)data + kConfigOff);
         pr_info("old config: %u\n", *config_ptr);
+#ifdef POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE
         if (old_pol->policydb.android_netlink_route) {
             pr_info("adding POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE\n");
             *config_ptr |= POLICYDB_CONFIG_ANDROID_NETLINK_ROUTE;
         }
+#endif
+#ifdef POLICYDB_CONFIG_ANDROID_NETLINK_GETNEIGH
         if (old_pol->policydb.android_netlink_getneigh) {
             pr_info("adding POLICYDB_CONFIG_ANDROID_NETLINK_GETNEIGH\n");
             *config_ptr |= POLICYDB_CONFIG_ANDROID_NETLINK_GETNEIGH;
         }
+#endif
         pr_info("new config: %u\n", *config_ptr);
     }
+#endif
 
     new_pol = kmemdup(old_pol, sizeof(*old_pol), GFP_KERNEL);
     if (!new_pol) {

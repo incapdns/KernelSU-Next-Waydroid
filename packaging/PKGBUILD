@@ -1,7 +1,7 @@
 pkgname=kernelsu-next-waydroid
 pkgver=$(git -C "$(realpath "$startdir/..")" describe --tags --long --always | \
     sed -E 's/^v//; s/-([0-9]+)-g/.r\1.g/; s/[^[:alnum:].]+/./g')
-pkgrel=1
+pkgrel=11
 pkgdesc='KernelSU Next dev host module for Waydroid on CachyOS x86_64'
 arch=('x86_64')
 license=('GPL-2.0-only')
@@ -9,6 +9,7 @@ depends=('modloader' 'waydroid' 'util-linux')
 conflicts=('kernelsu-dkms' 'kernelsu-waydroid-current')
 provides=('kernelsu-dkms')
 options=('!strip')
+backup=('etc/kernelsu-next-waydroid/uts-identity.conf')
 install=kernelsu-next-waydroid.install
 source=()
 sha256sums=()
@@ -21,10 +22,6 @@ package() {
         error "missing $module; run ./waydroid-kernelsu package"
         return 1
     }
-    [[ -x $repo_root/userspace/ksud/target/x86_64-linux-android/release/ksud ]] || {
-        error "missing Android x86_64 ksud; run ./waydroid-kernelsu package"
-        return 1
-    }
     kernel_release=$(modinfo -F vermagic "$module" | awk '{print $1}')
 
     install -Dm0644 "$module" \
@@ -35,16 +32,26 @@ package() {
         "$pkgdir/usr/lib/kernelsu-next-waydroid/load-module"
     install -Dm0755 "$repo_root/packaging/configure-waydroid-kernelsu" \
         "$pkgdir/usr/lib/kernelsu-next-waydroid/configure"
-    install -Dm0755 "$repo_root/packaging/kernelsu-waydroid-late-load" \
-        "$pkgdir/usr/lib/kernelsu-next-waydroid/late-load"
     install -Dm0755 "$repo_root/packaging/kernelsu-waydroid-aosp-mount-audit" \
         "$pkgdir/usr/lib/kernelsu-next-waydroid/audit"
     install -Dm0755 "$repo_root/packaging/kernelsu-waydroid-aosp-mount-hook" \
         "$pkgdir/usr/lib/kernelsu-next-waydroid/aosp-mount-hook"
+    install -Dm0755 "$repo_root/packaging/kernelsu-waydroid-uts" \
+        "$pkgdir/usr/lib/kernelsu-next-waydroid/uts"
+    install -Dm0755 "$repo_root/packaging/kernelsu-waydroid-configure-osrelease" \
+        "$pkgdir/usr/lib/kernelsu-next-waydroid/configure-osrelease"
+    install -Dm0755 "$repo_root/packaging/kernelsu-waydroid-sync-brene-uts" \
+        "$pkgdir/usr/lib/kernelsu-next-waydroid/sync-brene-uts"
+    install -Dm0644 "$repo_root/packaging/uts-identity.conf" \
+        "$pkgdir/etc/kernelsu-next-waydroid/uts-identity.conf"
     install -Dm0755 "$repo_root/packaging/kernelsu-waydroid-pre-start-hook" \
         "$pkgdir/usr/lib/kernelsu-next-waydroid/pre-start-hook"
-    install -Dm0755 "$repo_root/userspace/ksud/target/x86_64-linux-android/release/ksud" \
-        "$pkgdir/usr/lib/kernelsu-next-waydroid/ksud-x86_64"
-    install -Dm0644 "$repo_root/packaging/kernelsu-waydroid-late-load.service" \
-        "$pkgdir/usr/lib/systemd/system/kernelsu-waydroid-late-load.service"
+    install -Dm0755 "$repo_root/packaging/kernelsu-waydroid-post-stop-hook" \
+        "$pkgdir/usr/lib/kernelsu-next-waydroid/post-stop-hook"
+    install -Dm0755 "$repo_root/packaging/kernelsu-waydroid-unload" \
+        "$pkgdir/usr/lib/kernelsu-next-waydroid/unload"
+    install -Dm0644 "$repo_root/packaging/kernelsu-waydroid-unload.service" \
+        "$pkgdir/usr/lib/systemd/system/kernelsu-waydroid-unload.service"
+    install -Dm0644 "$repo_root/packaging/kernelsu-waydroid-unload.timer" \
+        "$pkgdir/usr/lib/systemd/system/kernelsu-waydroid-unload.timer"
 }
