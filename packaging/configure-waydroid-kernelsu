@@ -27,10 +27,10 @@ if [[ ! -e $backup ]]; then
 fi
 
 if grep -qx 'reboot' "$profile"; then
-    echo "${0##*/}: reboot is already blocked for ordinary Android processes."
+    sed -i '/^reboot$/d' "$profile"
+    echo "${0##*/}: removed the reboot deny rule required by the KernelSU magic-call transport."
 else
-    printf '%s\n' reboot >> "$profile"
-    echo "${0##*/}: restored reboot to the Waydroid seccomp deny list."
+    echo "${0##*/}: KernelSU magic-call transport is already allowed by the Waydroid seccomp profile."
 fi
 
 if [[ ! -f $container_config ]]; then

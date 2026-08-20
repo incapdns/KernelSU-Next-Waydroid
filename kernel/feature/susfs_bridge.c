@@ -8,7 +8,6 @@
 
 #include "feature/susfs_bridge.h"
 #include "feature/selinux_hide.h"
-#include "hook/syscall_hook_manager.h"
 #include "ksu.h"
 #include "selinux/selinux.h"
 
@@ -23,21 +22,15 @@ static bool ksu_susfs_is_current_domain(void)
 	if (is_ksu_domain())
 		return true;
 #endif
-#ifdef CONFIG_KSU_NON_ANDROID
 	/*
-	 * A non-init PID namespace is not sufficient proof that a task belongs
-	 * to Android.  LXC creates and populates Waydroid's mount namespace
-	 * before Android init executes; classifying those setup helpers as KSU
-	 * tasks makes SUSFS allocate synthetic mount IDs for infrastructure
-	 * mounts whose lifetime is managed by LXC.  Only widen the SELinux-domain
-	 * check after the syscall hook manager has registered Android's PID
-	 * namespace.
+	 * LXC creates Waydroid's infrastructure mounts before Android init execs,
+	 * which is also before the PID namespace can be registered by the syscall
+	 * hook manager.  Treat root in that non-host PID namespace as the KSU
+	 * mount creator so SUSFS assigns the synthetic IDs that its mountinfo
+	 * filter is designed to hide from applications.
 	 */
-	return current_uid().val == 0 && ksu_is_waydroid_task(current);
-#else
 	return current_uid().val == 0 &&
 	       task_active_pid_ns(current) != &init_pid_ns;
-#endif
 }
 
 static struct selinux_policy *ksu_susfs_get_backup_sepolicy(void)
@@ -60,8 +53,10 @@ int ksu_susfs_bridge_init(void)
 
 	if (ret)
 		pr_err("susfs: failed to register KernelSU bridge: %d\n", ret);
-	else
+	else {
+		susfs_prepare_mount_lifecycle();
 		ksu_susfs_bridge_sync_selinux();
+	}
 	return ret;
 }
 

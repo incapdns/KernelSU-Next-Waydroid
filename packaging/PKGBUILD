@@ -1,7 +1,7 @@
 pkgname=kernelsu-next-waydroid
-pkgver=$(git -C "$(realpath "$startdir/..")" describe --tags --long --always | \
-    sed -E 's/^v//; s/-([0-9]+)-g/.r\1.g/; s/[^[:alnum:].]+/./g')
-pkgrel=11
+pkgver=waydroid.dev.2026.08.19.r4.r0.g32cd7b57.mountfix1
+pkgrel=1
+epoch=1
 pkgdesc='KernelSU Next dev host module for Waydroid on CachyOS x86_64'
 arch=('x86_64')
 license=('GPL-2.0-only')
@@ -13,6 +13,11 @@ backup=('etc/kernelsu-next-waydroid/uts-identity.conf')
 install=kernelsu-next-waydroid.install
 source=()
 sha256sums=()
+
+pkgver() {
+    git -C "$(realpath "$startdir/..")" describe --tags --long --always \
+        --dirty=.mountfix1 | sed -E 's/^v//; s/-([0-9]+)-g/.r\1.g/; s/[^[:alnum:].]+/./g'
+}
 
 package() {
     local repo_root module kernel_release
