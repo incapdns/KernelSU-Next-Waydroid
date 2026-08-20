@@ -29,6 +29,7 @@
 #include "feature/proc_version_hide.h"
 #endif
 #include "feature/sucompat.h"
+#include "feature/susfs_bridge.h"
 #include "hook/setuid_hook.h"
 #include "hook/syscall_hook.h"
 #include "hook/syscall_event_bridge.h"
@@ -212,6 +213,7 @@ static void ksu_waydroid_exit(void *data, struct task_struct *task)
     old_ns = waydroid_pid_ns;
     waydroid_pid_ns = NULL;
     spin_unlock(&waydroid_state_lock);
+    ksu_susfs_bridge_waydroid_exit();
     if (old_ns)
         put_pid_ns(old_ns);
     ksu_waydroid_uts_restore();
