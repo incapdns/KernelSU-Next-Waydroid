@@ -106,6 +106,12 @@ static int reboot_handler_pre(struct kprobe *p, struct pt_regs *regs)
     if (magic1 == KSU_INSTALL_MAGIC1 && magic2 == KSU_INSTALL_MAGIC2) {
         struct ksu_install_fd_tw *tw;
 
+        /* The reboot transport is reachable before reboot(2)'s normal
+         * CAP_SYS_BOOT check.  Do not turn it into a public KernelSU oracle
+         * or hand an untrusted application a driver descriptor. */
+        if (!driver_client_allowed())
+            return 0;
+
         tw = kzalloc(sizeof(*tw), GFP_ATOMIC);
         if (!tw)
             return 0;

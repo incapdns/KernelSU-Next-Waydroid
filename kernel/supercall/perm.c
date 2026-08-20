@@ -19,9 +19,11 @@ bool manager_or_root(void)
     return current_uid().val == 0 || is_manager();
 }
 
-bool always_allow(void)
+bool driver_client_allowed(void)
 {
-    return true;
+    uid_t uid = current_uid().val;
+
+    return uid == 0 || is_manager() || ksu_is_allow_uid_for_current(uid);
 }
 
 bool allowed_for_su(void)
