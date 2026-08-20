@@ -111,9 +111,11 @@ static long __nocfi ksu_hook_execve_common(int orig_nr, const struct pt_regs *re
 
 #ifdef CONFIG_KSU_NON_ANDROID
     /* Android init forks an exec-service child before executing ksud, so the
-     * exec task is no longer PID 1. The dispatcher already limits privileged
-     * handling to tasks marked as belonging to the Waydroid PID namespace. */
-    ksu_handle_init_mark_tracker(filename_user);
+     * exec task is no longer PID 1. The dispatcher already limits handling to
+     * the Waydroid PID namespace; require the exec-service child to still be
+     * root before granting the KSU domain and an inheritable driver fd. */
+    if (current_uid().val == 0)
+        ksu_handle_init_mark_tracker(filename_user);
 #endif
 
     if (current_euid().val == 0)
